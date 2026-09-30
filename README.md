@@ -1,210 +1,78 @@
-# Tilawa
+# Quran Recitation Checker
 
-> Formerly called offline-tarteel.
+An iPhone app that listens while you recite. It works out which ayah you are on, follows you word by word, and in Correction mode stops you on a skipped or wrong word. Recognition runs entirely on the phone: it needs no network, and audio is never stored or sent anywhere.
 
-[![Maintained by auto-maintainer](https://am.whhite.com/badge/yazinsai/tilawa)](https://am.whhite.com/stats/yazinsai/tilawa)
+## Layout
 
-Offline Quran recognition. Give it 16 kHz mono audio, get back `surah:ayah`. Fully on-device — web, mobile, or node, no network at inference time.
+```
+RecitationKit/   Swift package: the recognition engine. No UI and no ONNX dependency.
+App/             SwiftUI iOS app (project.yml for XcodeGen)
+spec/            engine behaviour spec + frozen oracle vectors the engine must match
+tools/           asset fetch, Linux test runner, table/fixture generators
+assets/          model + phoneme corpus (NPL-1.2, fetched, not committed)
+```
 
-`@tilawa/core` is pure TypeScript with **zero native dependencies**. You inject the ONNX runtime.
+## How it works
 
-**Licence split:** package code is MIT. The Zipformer model and phoneme corpus are **NPL-1.2** (non-commercial, share-alike). FastConformer assets are MIT / NVIDIA CC-BY-4.0. Details: [NOTICE.md](https://github.com/yazinsai/tilawa/blob/main/NOTICE.md).
+```
+mic (AVAudioEngine, .measurement)  ->  16 kHz mono float
+  -> Kaldi fbank, 80 bins                               RecitationKit/Fbank.swift
+  -> streaming Zipformer2-CTC, one run per 480 ms        App: OnnxZipformerBackend (ONNX Runtime)
+  -> greedy CTC over 251 tajweed phonemes               CtcDecoder.swift
+  -> whole-Quran 5-gram index locates the ayah          Search.swift
+  -> per-surah DP tracker follows word by word          Tracker.swift
+  -> per-word verdicts (ok / unsure / wrong / skipped)  Verdicts.swift
+  -> events: verse match, word progress, correction     Session.swift, Emission.swift, Correction.swift
+```
 
-Two engines ship in the box. The default is **Zipformer** — streaming Zipformer2-CTC over a 251-token tajweed-phoneme vocabulary. **FastConformer** (text CTC) is still there under its original API.
+`RecitationSession` is the whole engine behind one API: `feed(samples)`, `stop()`, `reset()`, `setMode(_:)` and `correct(_:)`. It takes any `ZipformerBackend`, so tests drive it with a scripted model and the app plugs in ONNX Runtime. In the app, the `RecognitionService` actor owns the session and serialises every call to it. The `@MainActor` `RecitationModel` turns the engine's events into UI state.
 
-## Install
+## Build and run
+
+Requirements: Xcode 26 or later, and an iPhone on iOS 26 or later.
 
 ```bash
-npm i @tilawa/core
-# plus the onnxruntime for your platform (you own this dep):
-npm i onnxruntime-web            # browser / WASM
-npm i onnxruntime-node           # node
-npm i onnxruntime-react-native   # React Native
+tools/fetch-assets.sh        # 66 MB model + 5.5 MB phoneme corpus -> assets/ (sha256-checked)
+brew install xcodegen
+cd App && xcodegen generate && open QuranRecitationChecker.xcodeproj
 ```
 
-Default-engine assets from [release v0.3.0](https://github.com/yazinsai/tilawa/releases/tag/v0.3.0):
+Pick your team under Signing & Capabilities, choose an iPhone and run. Use a real device: the simulator's microphone path is not representative.
+
+## Tests
 
 ```bash
-base=https://github.com/yazinsai/tilawa/releases/download/v0.3.0
-curl -L -O "$base/zipformer_interp_gentle_a05.int8.onnx"  # 66 MB
-curl -L -O "$base/zipformer_quran.json"                    # 5.5 MB, NPL-1.2
-# optional — Arabic text on verse_match events
-curl -L -O https://github.com/yazinsai/tilawa/releases/download/v0.2.0/quran.json
+cd RecitationKit && swift test          # macOS; reads ../assets/zipformer_quran.json
+tools/swift.sh test                     # Linux or anywhere with Docker (swift:6.2-noble)
+RUN_PERF=1 tools/swift.sh test -c release --filter Performance
 ```
 
-The model's I/O manifest is bundled (`DEFAULT_ZIPFORMER_IO`). `quran.json` is display text only; matching works without it.
+The suite checks four things:
 
-## Browser
+- **Spec vectors.** Every oracle in `spec/vectors/` matches bit-exactly. That covers fbank, CTC decoding, the cost table, alignment, hashing and search, waqf handling, engine events and host emission.
+- **v0.1 parity.** 19 scripted sessions recorded from the v0.1 TypeScript engine replay to identical event streams. They cover single ayahs, long passages, skips, relocation, mistakes, pauses, mode switches and correction actions.
+- **Invariants.** Incremental caches match a from-scratch recompute, and the correction controller behaves correctly.
+- **Word mapping.** Every one of the 6236 ayahs' display words maps exactly onto the acoustic corpus words.
 
-```ts
-import * as ort from "onnxruntime-web";
-// `onnxruntime-web/wasm` works too
-import { createRecognitionSession } from "@tilawa/core";
+Tests that need the corpus are skipped when it is absent. CI (`.github/workflows/ci.yml`) runs the suite on Linux, then builds the app for the iOS simulator on macOS.
 
-// Vite copies `*.wasm` into the bundle by default. A raw <script type=module>
-// or a bundler that doesn't should set:
-// ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.2/dist/";
+## Performance
 
-const session = await createRecognitionSession({
-  ort,
-  model: () => fetch("/zipformer_interp_gentle_a05.int8.onnx").then((r) => r.arrayBuffer()),
-  corpus: () => fetch("/zipformer_quran.json").then((r) => r.json()),
-  quran: () => fetch("/quran.json").then((r) => r.json()), // optional
-  onEvent: (msg) => {
-    if (msg.type === "verse_match") console.log(`${msg.surah}:${msg.ayah}`, msg.verse_text);
-  },
-});
+These timings cover the engine's own work per 480 ms chunk: fbank, CTC decode, search, tracking, verdicts and emission. The model is scripted, so ONNX inference time is not included. Each run is a release build of one continuous recitation.
 
-for await (const chunk of micChunks) await session.feed(chunk);
-const final = await session.stop();
-session.reset();
-```
+| Recitation | v0 (TS) | v0.1 (TS) | v0.2 (Swift) |
+|---|---|---|---|
+| al-Baqarah 1–120, 25 min, p50 | 34.9 ms | 5.1 ms | 3.7 ms (p99 5.4 ms) |
+| al-Kahf 1–110, p50 | | | 1.95 ms |
 
-Passing `ort` + `model` picks the provider automatically: `["wasm"]` under onnxruntime-web, `["cpu"]` under onnxruntime-node. Override with `executionProviders`. On web we also set `ort.env.wasm.numThreads = 1` unless you already set it — pthread init hangs in workers without COOP/COEP; single-thread is what the demo ships.
+Per-chunk cost stays flat over long sessions: v0 grew linearly with the length of the session.
 
-`createZipformerSession(opts)` is the same thing without the engine switch, and returns the richer `ZipformerSession` (`transcript`, `verses`, `engineState`, …).
+## Licensing
 
-## Node
+The app code and RecitationKit are MIT (`LICENSE`). The Zipformer model and phoneme corpus are **NPL-1.2** Derivatives of Quran-Lab's work (`licenses/NPL-1.2.txt`, `NOTICE.md`). That licence forbids charging for the model or any feature it powers, and it is share-alike. So an App Store build that bundles them must be free, and the bundled assets stay NPL-1.2. The Amiri font is SIL OFL 1.1.
 
-```ts
-import { readFile } from "node:fs/promises";
-import * as ort from "onnxruntime-node";
-import { createRecognitionSession } from "@tilawa/core";
+## History
 
-const session = await createRecognitionSession({
-  ort,
-  model: () => readFile("zipformer_interp_gentle_a05.int8.onnx"),
-  corpus: async () => JSON.parse(await readFile("zipformer_quran.json", "utf8")),
-  quran: async () => JSON.parse(await readFile("quran.json", "utf8")),
-  onEvent: (msg) => {
-    if (msg.type === "verse_match") console.log(`${msg.surah}:${msg.ayah}`);
-    if (msg.type === "raw_transcript") console.log(msg.text);
-  },
-});
-
-const CHUNK = Math.round(0.3 * 16000); // 300 ms
-for (let i = 0; i < pcm16k.length; i += CHUNK) {
-  await session.feed(pcm16k.subarray(i, i + CHUNK));
-}
-const final = await session.stop();
-session.reset();
-```
-
-## React Native
-
-RN can't hand the model to ORT as an `ArrayBuffer` — bundle the `.onnx` as an asset, copy it to the documents dir, create the session from the **path**, and pass that session in with the runtime's `Tensor`:
-
-```ts
-import * as ort from "onnxruntime-react-native";
-import { createZipformerSession } from "@tilawa/core";
-
-const session = await createZipformerSession({
-  session: await ort.InferenceSession.create(modelPath),
-  Tensor: ort.Tensor,
-  corpus: () => loadJsonAsset("zipformer_quran.json"),
-  quran: () => loadJsonAsset("quran.json"),
-});
-```
-
-Walkthrough: [examples/react-native.md](https://github.com/yazinsai/tilawa/blob/main/packages/core/examples/react-native.md). Copy-paste runners: [examples/](https://github.com/yazinsai/tilawa/tree/main/packages/core/examples).
-
-## Alternate engine: FastConformer
-
-Pick it for one-shot `transcribe()`, a raw Arabic transcript, or MIT-only assets. Download from [release v0.2.0](https://github.com/yazinsai/tilawa/releases/tag/v0.2.0):
-
-```bash
-base=https://github.com/yazinsai/tilawa/releases/download/v0.2.0
-curl -L -O "$base/fastconformer_full_mixed.onnx"
-curl -L -O "$base/vocab.json"
-curl -L -O "$base/quran_ctc_tokens.json"
-```
-
-Write a `SessionRunner` that owns `ort`, then hand it to `createTilawaSession` with `{ vocab, quranCtcTokens, quran }`. Missing keys throw `Error("fastconformer engine requires assets: vocab, ctcTokens, quran ...")` before anything is read.
-
-```ts
-import * as ort from "onnxruntime-web";
-import { createTilawaSession, type SessionRunner } from "@tilawa/core";
-
-async function createWebSessionRunner(modelBuffer: ArrayBuffer): Promise<SessionRunner> {
-  const session = await ort.InferenceSession.create(modelBuffer, {
-    executionProviders: ["wasm"],
-  });
-  return {
-    async run(audio) {
-      const input = new ort.Tensor("float32", audio, [1, audio.length]);
-      const length = new ort.Tensor("int64", BigInt64Array.from([BigInt(audio.length)]), [1]);
-      const results = await session.run({ audio_signal: input, length });
-      const output = results[session.outputNames[0]];
-      const [, timeSteps, vocabSize] = output.dims as number[];
-      return { logprobs: output.data as Float32Array, timeSteps, vocabSize };
-    },
-  };
-}
-
-const session = createTilawaSession(await createWebSessionRunner(modelBuffer), {
-  vocab,
-  quranCtcTokens,
-  quran,
-});
-const pred = await session.transcribe(audioFloat32);
-// { surah: 1, ayah: 1, ayah_end: 3, score: 0.92, transcript: "..." }
-```
-
-Same runner shape on node (`onnxruntime-node`) and RN (create from a file path). FastConformer has no `stop()` — it finalizes on trailing silence. Wrap it in `createRecognitionSession({ engine: "fastconformer", runner, assets })` for the uniform `feed()` / `stop()` / `reset()` surface.
-
-## Verse events
-
-Both engines emit the same `WorkerOutbound` union — via `onEvent` / `onOutput`, and as the return value of `feed()` / `stop()`:
-
-| `msg.type` | Meaning | Key fields |
-|---|---|---|
-| `verse_match` | Confident match for the current verse | `surah`, `ayah`, `verse_text`, `surah_name`, `confidence`, `surrounding_verses` |
-| `verse_candidate` | Ranked candidates before lock-in | `candidates[]`, `stable`, `final_flush` |
-| `word_progress` | Word-level alignment within a verse | `surah`, `ayah`, `word_index`, `total_words`, `matched_indices` |
-| `raw_transcript` | Accumulated transcript so far (and again on `stop()`) | `text`, `confidence` |
-| `final_sequence` | Full ordered sequence when recitation ends | `verses[]`, `confidence` |
-
-## API
-
-### `createRecognitionSession(options)`
-
-`engine` defaults to `"zipformer"` (`DEFAULT_ENGINE`). Pass `engine: "fastconformer"` with `{ runner, assets }`. Returns `feed()`, `stop()` / `flush()`, `reset()`, plus `zipformer` / `fastconformer` (the other is `null`).
-
-### `createZipformerSession(options)` → `ZipformerSession`
-
-- `{ ort, model }` — runtime namespace + model bytes (or a loader). Providers: `["wasm"]` under onnxruntime-web, `["cpu"]` under onnxruntime-node.
-- `{ session, Tensor }` — an `InferenceSession` you created plus that runtime's `Tensor`. RN shape.
-
-| Option | Default | Purpose |
-|---|---|---|
-| `corpus` | *required* | Parsed `zipformer_quran.json`, or a loader |
-| `quran` | empty | Arabic text for `verse_match` |
-| `io` | `DEFAULT_ZIPFORMER_IO` | Override only for your own export |
-| `executionProviders` | auto | See above |
-| `onEvent` | — | Verse events, same order `feed()` / `stop()` return them |
-| `minWordFraction` | `0.5` | Fraction of an ayah's words that must land |
-| `enableFallback` | `true` | Whole-ayah search when nothing locked |
-| `tailSeconds` | `2.0` | Silence `stop()` appends to flush the CTC tail |
-
-Also: `transcript`, `tallies` / `verses`, `engineState`, `config`.
-
-### `createTilawaSession(runner, assets, options?)` → `TilawaSession`
-
-`assets`: `{ vocab, quranCtcTokens, quran, blankId? }`. `transcribe()` / `transcribeRaw()` / `feed()` / `reset()` / `setConfig()` / `getConfig()`. Streaming presets: `"conservative"` / `"balanced"` / `"aggressiveAdvance"`.
-
-`audio` on `SessionRunner.run` is **borrowed, not owned** — treat it as read-only.
-
-## Models
-
-| | Zipformer (default) | FastConformer |
-|---|---|---|
-| **File** | `zipformer_interp_gentle_a05.int8.onnx` (66 MB) | `fastconformer_full_mixed.onnx` (88 MB) |
-| **Input** | 16 kHz mono `Float32Array`, streamed | same, preprocessing in-graph |
-| **Recall / Precision / SeqAcc** | 100% / 100% / 100% on v1 (53/53) and v2 (43/43) | 100% / 100% / 100% on v1 (53/53) |
-| **Licence** | **NPL-1.2** non-commercial share-alike | NVIDIA [CC-BY-4.0](https://huggingface.co/nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0) |
-
-## This repository
-
-Live demo: [web/frontend](https://github.com/yazinsai/tilawa/tree/main/web/frontend) (Zipformer only). Bake-off writeups: [lab/EXPERIMENTS.md](https://github.com/yazinsai/tilawa/blob/main/lab/EXPERIMENTS.md).
-
-Zipformer models, vocabulary, and the phoneme corpus derive from [Quran-Lab/zipformer_p-arabic-v3](https://huggingface.co/Quran-Lab/zipformer_p-arabic-v3) and alketab's [ملقّن القرآن](https://prompter.alketab.app/). They are **NPL-1.2** and are not covered by this repo's MIT licence. [NOTICE.md](https://github.com/yazinsai/tilawa/blob/main/NOTICE.md).
+- **v0** — the initial import: the `@tilawa/core` TypeScript SDK, the web demo and the Python research lab.
+- **v0.1** — an audit of v0. Engine cost per chunk became flat over long sessions (7× faster at 25 minutes), and the demo mapped display words onto acoustic word indices. Stored recitations became readable only by the admin, and CI ran the demo's tests.
+- **v0.2** — the native iOS app, with the engine ported to Swift and proven identical to v0.1. The web demo, the SDK and the lab were removed from this branch; they remain in history at v0.1.

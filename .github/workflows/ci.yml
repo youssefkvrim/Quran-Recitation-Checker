@@ -71,5 +71,15 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/frontend/package-lock.json
+      - uses: actions/cache@v4
+        id: zipformer
+        with:
+          key: zipformer-assets-v0.3.0
+          path: |
+            web/frontend/public/models/zipformer_interp_gentle_a05.int8.onnx
+            web/frontend/public/zipformer_quran.json
+      - if: steps.zipformer.outputs.cache-hit != 'true'
+        run: scripts/fetch-zipformer-assets.sh
       - run: npm ci
+      - run: npm test # the corpus lets quran-words check every ayah's word mapping
       - run: npm run build

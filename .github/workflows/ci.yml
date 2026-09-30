@@ -45,8 +45,21 @@ jobs:
         working-directory: App
       # Report every compile error in one run, not just the first failing step.
       - run: defaults write com.apple.dt.Xcode IDEBuildingContinueBuildingAfterErrors -bool YES
-      # A generic iPhone (arm64, unsigned): the real target, one architecture.
+      # Release build for a generic iPhone (arm64), unsigned.
       - run: >
           xcodebuild -quiet -project QuranRecitationChecker.xcodeproj -scheme QuranRecitationChecker
-          -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
+          -configuration Release -destination 'generic/platform=iOS' -derivedDataPath build
+          CODE_SIGNING_ALLOWED=NO build
         working-directory: App
+      # An unsigned .ipa to sign and install with your own Apple ID (e.g. Sideloadly).
+      - run: |
+          mkdir -p ipa/Payload
+          cp -R build/Build/Products/Release-iphoneos/QuranRecitationChecker.app ipa/Payload/
+          (cd ipa && zip -qry ../QuranRecitationChecker.ipa Payload)
+          ls -lh QuranRecitationChecker.ipa
+        working-directory: App
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuranRecitationChecker-ipa
+          path: App/QuranRecitationChecker.ipa
+          retention-days: 14

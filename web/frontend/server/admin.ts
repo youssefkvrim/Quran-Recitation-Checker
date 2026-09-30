@@ -1,23 +1,17 @@
 import { Hono } from "hono";
-import { getCookie, setCookie } from "hono/cookie";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { adminEnabled, checkPassword, escapeHtml, isAuthed, signIn } from "./auth.js";
 
 const STORAGE_DIR = process.env.STORAGE_DIR || "./storage/reports";
 const DIAGNOSTICS_DIR = process.env.STORAGE_DIR
   ? join(process.env.STORAGE_DIR, "../diagnostics")
   : "./storage/diagnostics";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "tarteel-admin";
-
 export const adminApp = new Hono();
-
-// Auth check
-function isAuthed(c: any): boolean {
-  return getCookie(c, "admin_auth") === "1";
-}
 
 // Login page
 adminApp.get("/login", (c) => {
+  if (!adminEnabled) return c.text("Admin is disabled: set ADMIN_PASSWORD on the server.", 503);
   const error = c.req.query("error") ? "<p style='color:#c0564b'>Wrong password</p>" : "";
   return c.html(`<!DOCTYPE html>
 <html><head><title>Admin Login</title>
@@ -34,10 +28,10 @@ button{margin-top:0.5rem;padding:0.5rem 1.5rem;background:#b8986a;color:#fff;bor
 });
 
 adminApp.post("/login", async (c) => {
+  if (!adminEnabled) return c.text("Admin is disabled: set ADMIN_PASSWORD on the server.", 503);
   const form = await c.req.formData();
-  const pw = form.get("password") as string;
-  if (pw === ADMIN_PASSWORD) {
-    setCookie(c, "admin_auth", "1", { path: "/admin", httpOnly: true, maxAge: 86400 });
+  if (checkPassword(form.get("password"))) {
+    signIn(c);
     return c.redirect("/admin");
   }
   return c.redirect("/admin/login?error=1");
@@ -73,12 +67,12 @@ adminApp.get("/", async (c) => {
 
   const rows = reports.map(r => `
     <tr>
-      <td>${new Date(r.timestamp).toLocaleString()}</td>
-      <td>Surah ${r.surah}, Ayah ${r.ayah}</td>
-      <td>${r.modelPrediction || "—"}</td>
-      <td>${r.debugBundle?.mode || "—"}</td>
-      <td>${r.notes ? r.notes.slice(0, 80) : "—"}</td>
-      <td><audio controls src="/api/reports/${r.id}/audio" preload="none"></audio></td>
+      <td>${escapeHtml(new Date(r.timestamp).toLocaleString())}</td>
+      <td>Surah ${escapeHtml(r.surah)}, Ayah ${escapeHtml(r.ayah)}</td>
+      <td>${escapeHtml(r.modelPrediction || "—")}</td>
+      <td>${escapeHtml(r.debugBundle?.mode || "—")}</td>
+      <td>${escapeHtml(typeof r.notes === "string" && r.notes ? r.notes.slice(0, 80) : "—")}</td>
+      <td><audio controls src="/api/reports/${escapeHtml(r.id)}/audio" preload="none"></audio></td>
     </tr>`).join("");
 
   const triggerLabel = (t: string) =>
@@ -86,10 +80,10 @@ adminApp.get("/", async (c) => {
 
   const diagRows = diagnostics.map(d => `
     <tr>
-      <td>${new Date(d.timestamp).toLocaleString()}</td>
-      <td><span class="trigger-badge trigger-${d.trigger}">${triggerLabel(d.trigger)}</span></td>
+      <td>${escapeHtml(new Date(d.timestamp).toLocaleString())}</td>
+      <td><span class="trigger-badge trigger-${escapeHtml(d.trigger)}">${escapeHtml(triggerLabel(d.trigger))}</span></td>
       <td>${Array.isArray(d.events) ? d.events.length : 0}</td>
-      <td>${d.hasAudio ? `<audio controls src="/api/diagnostics/${d.id}/audio" preload="none"></audio>` : "—"}</td>
+      <td>${d.hasAudio ? `<audio controls src="/api/diagnostics/${escapeHtml(d.id)}/audio" preload="none"></audio>` : "—"}</td>
     </tr>`).join("");
 
   return c.html(`<!DOCTYPE html>

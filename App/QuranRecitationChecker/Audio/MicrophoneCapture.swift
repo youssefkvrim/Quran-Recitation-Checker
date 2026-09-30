@@ -11,6 +11,8 @@ final class MicrophoneCapture: @unchecked Sendable {
     var samples: [Float]
     /// RMS level of the chunk, for the UI meter.
     var level: Float
+    /// When the tap delivered it, for the lag measurement.
+    var captured: ContinuousClock.Instant
   }
 
   enum Failure: LocalizedError {
@@ -84,6 +86,7 @@ final class MicrophoneCapture: @unchecked Sendable {
   }
 
   private func convert(_ buffer: AVAudioPCMBuffer) {
+    let captured = ContinuousClock.now
     let (converter, continuation) = lock.withLock { (self.converter, self.continuation) }
     guard let converter, let continuation, buffer.frameLength > 0 else { return }
     let ratio = target.sampleRate / buffer.format.sampleRate
@@ -105,6 +108,6 @@ final class MicrophoneCapture: @unchecked Sendable {
     let samples = Array(UnsafeBufferPointer(start: channel, count: Int(out.frameLength)))
     var energy: Float = 0
     for s in samples { energy += s * s }
-    continuation.yield(Chunk(samples: samples, level: (energy / Float(samples.count)).squareRoot()))
+    continuation.yield(Chunk(samples: samples, level: (energy / Float(samples.count)).squareRoot(), captured: captured))
   }
 }

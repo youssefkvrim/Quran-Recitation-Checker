@@ -41,6 +41,9 @@ public final class ZipformerRunner {
   public let io: ZipformerIO
   public let backend: ZipformerBackend
   private var pending: [Float] = []
+  /// Wall-clock time spent in `backend.run` since creation, and how many runs.
+  public private(set) var modelTime: Duration = .zero
+  public private(set) var modelRuns = 0
 
   public init(backend: ZipformerBackend, io: ZipformerIO = .shipped) {
     self.backend = backend
@@ -61,7 +64,10 @@ public final class ZipformerRunner {
     let hop = io.hopFrames * io.featureDim
     var logProbs: [Float] = []
     while pending.count >= window {
+      let start = ContinuousClock.now
       logProbs.append(contentsOf: try backend.run(features: Array(pending[0..<window])))
+      modelTime += ContinuousClock.now - start
+      modelRuns += 1
       pending.removeFirst(hop)
     }
     return (logProbs, logProbs.count / io.vocabSize)

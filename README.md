@@ -67,6 +67,15 @@ These timings cover the engine's own work per 480 ms chunk: fbank, CTC decode, s
 
 Per-chunk cost stays flat over long sessions: v0 grew linearly with the length of the session.
 
+On an iPhone, hold the status line under the record button to show the live profile. It updates every second and shows:
+
+- model and engine time per 480 ms window (p50, p95, max),
+- lag from microphone to result,
+- the share of real time spent computing,
+- thermal state, battery drain and memory headroom.
+
+Touch and hold the readout to copy it.
+
 ## Licensing
 
 The app code and RecitationKit are MIT (`LICENSE`). The Zipformer model and phoneme corpus are **NPL-1.2** Derivatives of Quran-Lab's work (`licenses/NPL-1.2.txt`, `NOTICE.md`). That licence forbids charging for the model or any feature it powers, and it is share-alike. So an App Store build that bundles them must be free, and the bundled assets stay NPL-1.2. The Amiri font is SIL OFL 1.1.

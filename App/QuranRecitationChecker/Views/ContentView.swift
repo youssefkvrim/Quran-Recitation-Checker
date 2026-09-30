@@ -37,6 +37,9 @@ private struct RecitationView: View {
 
   var body: some View {
     VStack(spacing: 20) {
+      if model.showsPerformance {
+        PerformanceReadout(model: model)
+      }
       if let position = model.position, let text = model.text, let surah = text.surah(position.surah) {
         PassageView(surah: surah, position: position)
       } else {
@@ -56,6 +59,12 @@ private struct RecitationView: View {
         .font(.footnote)
         .foregroundStyle(.secondary)
         .padding(.bottom, 8)
+        // Hidden: hold the status line to show or hide the performance readout.
+        .onLongPressGesture(minimumDuration: 0.8) { model.showsPerformance.toggle() }
+        .sensoryFeedback(.selection, trigger: model.showsPerformance)
+        .accessibilityAction(named: Text(model.showsPerformance ? "Hide performance readout" : "Show performance readout")) {
+          model.showsPerformance.toggle()
+        }
     }
     .padding(.horizontal, 20)
     .sheet(item: correctionBinding) { correction in

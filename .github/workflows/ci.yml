@@ -43,7 +43,10 @@ jobs:
       - run: brew install xcodegen
       - run: xcodegen generate
         working-directory: App
+      # Report every compile error in one run, not just the first failing step.
+      - run: defaults write com.apple.dt.Xcode IDEBuildingContinueBuildingAfterErrors -bool YES
+      # A generic iPhone (arm64, unsigned): the real target, one architecture.
       - run: >
-          xcodebuild -project QuranRecitationChecker.xcodeproj -scheme QuranRecitationChecker
-          -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+          xcodebuild -quiet -project QuranRecitationChecker.xcodeproj -scheme QuranRecitationChecker
+          -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
         working-directory: App

@@ -38,3 +38,7 @@ npx tsx test/stability-report.ts --repeats=1 --corpus=test_corpus_v3 --json=test
 ```
 
 int8 ONNX sha256 `eaf099af…` (66 MB). Threads stay off (`numThreads=1`, EP `wasm`). First load is ~66 MB into IndexedDB under `zipformer-interp-gentle-a05-int8`.
+
+## Server (reports admin)
+
+`npm run build:server && npm run start` serves the demo plus `/api/reports` (users submit a recording with a misrecognition report) and `/admin`. Reading reports or their audio needs an admin session. Set `ADMIN_PASSWORD` on the server to enable `/admin`; without it the admin area and the report read APIs stay closed. Sessions are per process, so a restart signs out.

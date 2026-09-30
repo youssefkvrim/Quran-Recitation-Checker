@@ -181,6 +181,16 @@ describe("ZipformerSession", () => {
     });
 
     const progress = returned.filter((m) => m.type === "word_progress");
+    // An unchanged word_progress is not repeated until something else is drawn.
+    let lastProgress: string | null = null;
+    for (const m of returned) {
+      if (m.type === "word_progress") {
+        expect(JSON.stringify(m)).not.toBe(lastProgress);
+        lastProgress = JSON.stringify(m);
+      } else if (m.type !== "raw_transcript") {
+        lastProgress = null;
+      }
+    }
     for (const p of progress) {
       if (p.type !== "word_progress") continue;
       expect(p.surah).toBe(1);

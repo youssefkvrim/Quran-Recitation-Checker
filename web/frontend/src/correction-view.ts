@@ -1,8 +1,10 @@
 import type { CorrectionAction, CorrectionState } from '@tilawa/core';
+import type { AyahWord } from './lib/quran-words';
 
 export interface PracticeVerse {
-  words: string[];
-  wordOffset?: number;
+  /** Display words; `first`/`count` is the acoustic word range each covers
+   * (the display-only bismillah covers none). */
+  words: AyahWord[];
   name: string;
   nameEn: string;
   ayahCount: number;
@@ -81,10 +83,13 @@ export class CorrectionView {
     const phrase = this.dialog.querySelector('#practice-verse')!;
     phrase.replaceChildren();
     // Display the original full ayah, including all diacritics and stop marks.
+    const from = issue.word;
+    const to = issue.word + Math.max(1, issue.words ?? 1);
     verse.words.forEach((word, index) => {
-      const span = document.createElement('span'); span.textContent = word;
+      const span = document.createElement('span'); span.textContent = word.text;
       // Ayah-level issues highlight the whole ayah (the bismillah prefix stays plain).
-      if (wholeAyah ? index >= (verse.wordOffset ?? 0) : index === issue.word + (verse.wordOffset ?? 0)) span.className = 'practice-word';
+      const flagged = word.count > 0 && (wholeAyah || (word.first < to && from < word.first + word.count));
+      if (flagged) span.className = 'practice-word';
       phrase.append(span, document.createTextNode(index < verse.words.length - 1 ? ' ' : ''));
     });
     set('practice-title', phase === 'retrying' ? tr('Take your time.', 'خذ وقتك.') : phase === 'corrected'

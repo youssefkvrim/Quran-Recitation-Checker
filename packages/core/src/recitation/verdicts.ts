@@ -41,13 +41,16 @@ export function pausalPhonemes(
   return result;
 }
 
+/** How far past a word's span `stopBoundary` looks for a pause. */
+const STOP_LOOKAHEAD = 4;
+
 function stopBoundary(
   heard: readonly HeardChar[],
   from: number,
   to: number,
   settleFrames: number,
 ): number {
-  const end = Math.min(heard.length, to + 4);
+  const end = Math.min(heard.length, to + STOP_LOOKAHEAD);
   for (let i = from + 1; i <= end; i++) {
     if (i === heard.length) return i;
     if (heard[i]!.frame - heard[i - 1]!.frame >= settleFrames) return i;
@@ -74,12 +77,42 @@ interface CachedSeg {
   spans: Map<number, Span>;
 }
 
+/** A judged word and the only inputs its verdict depends on (see `judge`). */
+interface JudgedWord {
+  from: number;
+  to: number;
+  pending: boolean;
+  interior: boolean;
+  verdict: WordVerdict | null;
+}
+
+/**
+ * Per-word verdicts traced from the tracker's cursor trail (spec §9).
+ *
+ * `verdicts()` is called several times per audio chunk (engine change
+ * detection, emission, word progress, correction), and a naive trace re-judges
+ * every word since the lock on every call — quadratic over a long surah. Two
+ * caches keep it linear without changing a single verdict:
+ *
+ * - The result is a pure function of the tracker's (revision, heard length)
+ *   and `settled`, so it is memoised on exactly that.
+ * - A word's verdict depends only on its span, whether it is pending, whether
+ *   it is interior (for `skipped`), and the heard chars from its span start to
+ *   `STOP_LOOKAHEAD` past its end. Heard chars are append-only within a
+ *   revision, so once that window is complete the verdict is reused until one
+ *   of those inputs changes.
+ *
+ * Returned arrays and verdict objects are shared between callers: read-only.
+ */
 export class VerdictTracer {
   private readonly tracker: Tracker;
   private readonly table: CostTable;
   private readonly cfg: EngineConfig;
   private cache = new Map<string, CachedSeg>();
   private cacheRevision = -1;
+  private readonly words = new Map<number, JudgedWord>();
+  /** Memoised results for settled=false / settled=true, keyed by heard length. */
+  private readonly memo: Array<{ heardLen: number; result: WordVerdict[] } | null> = [null, null];
 
   constructor(tracker: Tracker, table: CostTable, cfg: EngineConfig = DEFAULT_CONFIG) {
     this.tracker = tracker;
@@ -91,8 +124,13 @@ export class VerdictTracer {
     const t = this.tracker;
     if (this.cacheRevision !== t.revision) {
       this.cache.clear();
+      this.words.clear();
+      this.memo[0] = this.memo[1] = null;
       this.cacheRevision = t.revision;
     }
+    const slot = settled ? 1 : 0;
+    const memo = this.memo[slot];
+    if (memo && memo.heardLen === t.heard.length) return memo.result;
     const segs = this.segment(t.trail);
     const spans = new Map<number, Span>();
     for (let s = 0; s < segs.length; s++) {
@@ -111,7 +149,11 @@ export class VerdictTracer {
       }
       for (const [w, sp] of got.spans) spans.set(w, sp);
     }
-    return this.judge(spans, settled);
+    // The last segment's run is the number of backward cursor moves so far.
+    const lastRun = segs.length ? segs[segs.length - 1]!.run : 0;
+    const result = this.judge(spans, settled, lastRun);
+    this.memo[slot] = { heardLen: t.heard.length, result };
+    return result;
   }
 
   private segment(trail: number[]): Segment[] {
@@ -182,7 +224,7 @@ export class VerdictTracer {
     return spans;
   }
 
-  private judge(spans: Map<number, Span>, settled: boolean): WordVerdict[] {
+  private judge(spans: Map<number, Span>, settled: boolean, lastRun: number): WordVerdict[] {
     const t = this.tracker;
     if (spans.size === 0) return [];
     let minWord = Infinity;
@@ -191,7 +233,6 @@ export class VerdictTracer {
       if (w < minWord) minWord = w;
       if (w > maxWord) maxWord = w;
     }
-    const lastRun = t.trail.length ? this.lastRun(t.trail) : 0;
     const cursorWord = Math.max(0, t.cursorLocalWord);
     const cursorPending = !t.reachedEnd && !settled;
     const dwell = settled ? 0 : this.cfg.commitDwell;
@@ -199,81 +240,99 @@ export class VerdictTracer {
     const out: WordVerdict[] = [];
     for (let w = minWord; w <= maxWord; w++) {
       const span = spans.get(w);
-      const globalWord = t.firstWord + w;
-      const exp = t.corpus.wordPhonemes(globalWord);
-      const expLen = exp.length;
-      let pending =
+      const pending =
         (w === cursorWord && cursorPending) ||
         (!!span && span.to > heardLen - dwell) ||
         (!!span && span.run < lastRun && w >= cursorWord);
-      const heardCount = span ? span.to - span.from : 0;
-      if (!pending && heardCount < this.cfg.minHeardFraction * expLen) {
-        if (minWord < w && w < maxWord) {
-          const ratio = expLen > 0 ? heardCount / expLen : 0;
-          out.push(this.makeVerdict(globalWord, "skipped", 1, ratio, 0));
-        }
-        continue;
-      }
-      if (!span) continue;
-      const from = span.from;
-      let to = span.to;
-      let heardSlice = sliceHeard(t.heard, from, to);
-      let distance = normalizedDistance(
-        this.table.encode(heardSlice),
-        this.table.encode(exp),
-        this.table,
-      );
-      const atAyahEnd =
-        t.corpus.wordInAyah[globalWord]! ===
-        t.corpus.ayahWordCount(t.corpus.wordSurah[globalWord]!, t.corpus.wordAyah[globalWord]!) - 1;
-      const pausal = pausalPhonemes(exp, t.corpus.plain[globalWord]!, atAyahEnd);
-      let expUsed = exp;
-      if (distance > this.cfg.okDistance && pausal) {
-        const stop = stopBoundary(t.heard, from, to, this.cfg.settleFrames);
-        if (stop >= 0) {
-          if (stop !== to) {
-            to = stop;
-            heardSlice = sliceHeard(t.heard, from, to);
-          }
-          const d2 = normalizedDistance(
-            this.table.encode(heardSlice),
-            this.table.encode(pausal),
-            this.table,
-          );
-          if (d2 < distance) {
-            distance = d2;
-            expUsed = pausal;
-          }
+      const interior = minWord < w && w < maxWord;
+      const from = span ? span.from : -1;
+      const to = span ? span.to : -1;
+      const cached = this.words.get(w);
+      let verdict: WordVerdict | null;
+      if (
+        cached &&
+        cached.from === from &&
+        cached.to === to &&
+        cached.pending === pending &&
+        cached.interior === interior
+      ) {
+        verdict = cached.verdict;
+      } else {
+        verdict = this.judgeWord(w, span, pending, interior);
+        // Final once the pause lookahead past the span has been heard.
+        if (!span || span.to + STOP_LOOKAHEAD < heardLen) {
+          this.words.set(w, { from, to, pending, interior, verdict });
         }
       }
-      const vowels = pending
-        ? { errors: 0, margin: 0 }
-        : vowelMismatches(t.heard, from, heardSlice, expUsed, this.table);
-      let margin = 0;
-      const spanHeard = span.to - span.from;
-      if (spanHeard > 0) {
-        for (let i = span.from; i < span.to; i++) margin += t.heard[i]!.margin;
-        margin /= spanHeard;
-      }
-      const heardRatio = expLen > 0 ? spanHeard / expLen : 0;
-      let state: VerdictState;
-      if (pending) state = "pending";
-      else if (distance <= this.cfg.okDistance) state = "ok";
-      else if (distance <= this.cfg.unsureDistance || margin < this.cfg.minMargin) state = "unsure";
-      else state = "wrong";
-      out.push(
-        this.makeVerdict(globalWord, state, distance, heardRatio, margin, vowels.errors, vowels.margin),
-      );
+      if (verdict) out.push(verdict);
     }
     return out;
   }
 
-  private lastRun(trail: number[]): number {
-    let run = 0;
-    for (let g = 1; g < trail.length; g++) {
-      if (trail[g]! < trail[g - 1]!) run++;
+  private judgeWord(
+    w: number,
+    span: Span | undefined,
+    pending: boolean,
+    interior: boolean,
+  ): WordVerdict | null {
+    const t = this.tracker;
+    const globalWord = t.firstWord + w;
+    const exp = t.corpus.wordPhonemes(globalWord);
+    const expLen = exp.length;
+    const heardCount = span ? span.to - span.from : 0;
+    if (!pending && heardCount < this.cfg.minHeardFraction * expLen) {
+      if (!interior) return null;
+      const ratio = expLen > 0 ? heardCount / expLen : 0;
+      return this.makeVerdict(globalWord, "skipped", 1, ratio, 0);
     }
-    return run;
+    if (!span) return null;
+    const from = span.from;
+    let to = span.to;
+    let heardSlice = sliceHeard(t.heard, from, to);
+    let distance = normalizedDistance(
+      this.table.encode(heardSlice),
+      this.table.encode(exp),
+      this.table,
+    );
+    const atAyahEnd =
+      t.corpus.wordInAyah[globalWord]! ===
+      t.corpus.ayahWordCount(t.corpus.wordSurah[globalWord]!, t.corpus.wordAyah[globalWord]!) - 1;
+    const pausal = pausalPhonemes(exp, t.corpus.plain[globalWord]!, atAyahEnd);
+    let expUsed = exp;
+    if (distance > this.cfg.okDistance && pausal) {
+      const stop = stopBoundary(t.heard, from, to, this.cfg.settleFrames);
+      if (stop >= 0) {
+        if (stop !== to) {
+          to = stop;
+          heardSlice = sliceHeard(t.heard, from, to);
+        }
+        const d2 = normalizedDistance(
+          this.table.encode(heardSlice),
+          this.table.encode(pausal),
+          this.table,
+        );
+        if (d2 < distance) {
+          distance = d2;
+          expUsed = pausal;
+        }
+      }
+    }
+    const vowels = pending
+      ? { errors: 0, margin: 0 }
+      : vowelMismatches(t.heard, from, heardSlice, expUsed, this.table);
+    let margin = 0;
+    const spanHeard = span.to - span.from;
+    if (spanHeard > 0) {
+      for (let i = span.from; i < span.to; i++) margin += t.heard[i]!.margin;
+      margin /= spanHeard;
+    }
+    const heardRatio = expLen > 0 ? spanHeard / expLen : 0;
+    let state: VerdictState;
+    if (pending) state = "pending";
+    else if (distance <= this.cfg.okDistance) state = "ok";
+    else if (distance <= this.cfg.unsureDistance || margin < this.cfg.minMargin) state = "unsure";
+    else state = "wrong";
+    return this.makeVerdict(globalWord, state, distance, heardRatio, margin, vowels.errors, vowels.margin);
   }
 
   private makeVerdict(

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+Latency: the Zipformer engine's per-chunk cost no longer grows with the length of the session.
+
+- **Verdicts are traced once per tracker state.** `VerdictTracer.verdicts()` ran 4–5 times per audio chunk and re-judged every word since the lock each time, so cost grew with the surah. It is now memoised on (tracker revision, heard length, settled), and a word's verdict is reused once the heard chars it depends on are complete. On a scripted 25-minute al-Baqarah session the engine's time per 480 ms chunk went from 35 ms median / 66 ms late in the session to a flat 5 ms (Node, desktop CPU).
+- **Tracker DP in one pass, no allocation.** The per-char surah-wide column no longer allocates a new `Float32Array` (≈200 KB per heard char on al-Baqarah) or rescans for the column minimum; values are bit-identical to spec §8. `Tracker.retract()` replays from the start instead of keeping periodic column snapshots (the host never retracts).
+- **Relocation searches only when it could relocate.** The every-1.5 s relocation tick ran a full index search even while tracking was healthy; the previous tick's candidate is now resolved lazily, with identical decisions.
+- **`word_progress` is not repeated.** An identical `word_progress` is dropped until something else the UI draws from (`verse_match`, `verse_candidate`, `correction`, `final_sequence`, a re-lock) has been sent. Roughly 45% of them were exact repeats.
+- Tracking mode no longer traces non-settled verdicts for the correction controller, which cannot flag in that mode.
+- `ZipformerSession.verdicts()` returns a copy; verdict arrays and objects from `VerdictTracer` are shared and read-only.
+- The session's whole-ayah fallback now uses `wholeAyahFallback` (one implementation; ayah encodings cached per corpus and built on first use instead of at session creation).
+
+Event streams are otherwise unchanged: the oracle vectors still match exactly, and an old-vs-new replay of 21 scripted recitations (clean, perturbed, repeats, skipped ayahs, surah switches, long pauses, correction retries) produces identical messages apart from the dropped repeats.
+
 ## 0.3.1
 
 Correction mode no longer stays silent when a whole ayah is missed.

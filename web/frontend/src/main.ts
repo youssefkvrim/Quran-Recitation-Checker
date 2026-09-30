@@ -4,7 +4,7 @@ import "./style.css";
 import "./arabic-font.css";
 import type { RecitationMode, CorrectionState, WordVerdict } from "@tilawa/core";
 import { CorrectionView } from "./correction-view";
-import { splitUthmaniWords, startsWithBismillah, BISMILLAH_WORD_COUNT } from "./lib/quran-words";
+import { ayahWords, acousticWordCount, startsWithBismillah, BISMILLAH_WORD_COUNT } from "./lib/quran-words";
 
 import { initSurahDropdown, openReportDialog } from "./report-dialog";
 
@@ -54,6 +54,9 @@ interface DiagnosticEvent {
 }
 
 const MAX_DIAGNOSTIC_EVENTS = 50;
+/** Audio kept for "Report" (most recent). Float32 at 16 kHz is 3.8 MB a minute;
+ * keeping a whole long session can exhaust a phone tab's memory. */
+const MAX_REPORT_AUDIO_SAMPLES = 16000 * 180;
 const MAX_DEBUG_EVENTS = 80;
 const DIAGNOSTIC_COOLDOWN_MS = 30_000;
 const DEBUG_VIEW_ENABLED = Boolean(import.meta.env.VITE_DEBUG_MODE);
@@ -79,6 +82,7 @@ const state = {
   surahCache: new Map<number, SurahData>(),
   quranData: null as QuranVerse[] | null,
   sessionAudioChunks: [] as Float32Array[],
+  sessionAudioSamples: 0,
   lastModelPrediction: null as { surah: number; ayah: number; confidence: number } | null,
   diagnosticEvents: [] as DiagnosticEvent[],
   debugEvents: [] as DebugMessage[],
@@ -187,14 +191,13 @@ async function handleCorrection(msg: Extract<WorkerOutbound, { type: 'correction
   const issue = msg.state.issue;
   const surah = await fetchSurah(issue.surah);
   const verse = surah.verses.find(v => v.ayah === issue.ayah);
-  const words = verse ? splitUthmaniWords(verse.text_uthmani).map(w => w.text) : [];
+  const words = verse ? ayahWords(issue.surah, issue.ayah, verse.text_uthmani) : [];
   // Never attach acoustic indices to a different display tokenization.
-  const wordOffset = issue.ayah === 1 && issue.surah !== 1 && issue.surah !== 9 && verse && startsWithBismillah(verse.text_uthmani) ? BISMILLAH_WORD_COUNT : 0;
-  if (words.length - wordOffset !== msg.totalWords || !words[issue.word + wordOffset]) {
+  if (acousticWordCount(words) !== msg.totalWords || !words.some(w => w.first <= issue.word && issue.word < w.first + w.count)) {
     state.worker?.postMessage({ type: 'correction_action', action: 'close' });
     return;
   }
-  practice.show(msg.state, { words, wordOffset, name: surah.surah_name, nameEn: surah.surah_name_en, ayahCount: surah.verses.length }, language === 'ar');
+  practice.show(msg.state, { words, name: surah.surah_name, nameEn: surah.surah_name_en, ayahCount: surah.verses.length }, language === 'ar');
 }
 
 function refreshLabels(): void {
@@ -387,22 +390,22 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
     verseEl.className = "verse verse--upcoming";
     verseEl.setAttribute("data-ayah", String(v.ayah));
 
-    const allWords = splitUthmaniWords(v.text_uthmani);
-    const skipBsm = hasBismillah && v.ayah === 1;
-    const startIdx = skipBsm ? BISMILLAH_WORD_COUNT : 0;
+    // The bismillah is drawn above, so its display-only words are left out.
+    const words = ayahWords(group.surah, v.ayah, v.text_uthmani).filter(w => w.count > 0);
 
     const textEl = document.createElement("span");
     textEl.className = "verse-text";
-    for (let i = startIdx; i < allWords.length; i++) {
+    words.forEach((w, i) => {
       const wordEl = document.createElement("span");
       wordEl.className = "word";
-      wordEl.setAttribute("data-word-idx", String(i - startIdx));
-      wordEl.textContent = allWords[i].text;
+      wordEl.dataset.wordIdx = String(w.first);
+      wordEl.dataset.wordCount = String(w.count);
+      wordEl.textContent = w.text;
       textEl.appendChild(wordEl);
-      if (i < allWords.length - 1) {
+      if (i < words.length - 1) {
         textEl.appendChild(document.createTextNode(" "));
       }
-    }
+    });
     verseEl.appendChild(textEl);
 
     const markerEl = document.createElement("span");
@@ -506,9 +509,6 @@ async function handleVerseMatch(msg: VerseMatchMessage): Promise<void> {
   updateVerseHighlight(group, msg.ayah);
 }
 
-let _matchedWordIndices = new Set<number>();
-let _trackingKey = "";
-
 function handleWordProgress(msg: WordProgressMessage): void {
   const lastGroup = state.groups[state.groups.length - 1];
   if (!lastGroup || lastGroup.surah !== msg.surah) return;
@@ -522,30 +522,15 @@ function handleWordProgress(msg: WordProgressMessage): void {
     updateVerseHighlight(lastGroup, msg.ayah);
   }
 
-  const key = `${msg.surah}:${msg.ayah}`;
-  if (key !== _trackingKey) {
-    _matchedWordIndices = new Set<number>();
-    _trackingKey = key;
-  }
-
-  for (const idx of msg.matched_indices) {
-    _matchedWordIndices.add(idx);
-  }
-
-  let contiguousMax = -1;
-  for (let i = 0; i <= msg.total_words; i++) {
-    if (_matchedWordIndices.has(i)) {
-      contiguousMax = i;
-    } else {
-      break;
-    }
-  }
-
+  // Follow the tracker's cursor. It keeps moving past a word it could not
+  // match (that is the correction mode's business), and moves back on a repeat.
+  const at = msg.word_index;
   const wordEls = verseEl.querySelectorAll<HTMLElement>(".word");
   for (const wordEl of wordEls) {
-    const idx = parseInt(wordEl.getAttribute("data-word-idx") || "-1");
-    wordEl.classList.toggle("word--spoken", idx < contiguousMax);
-    wordEl.classList.toggle("word--current", idx === contiguousMax);
+    const first = Number(wordEl.dataset.wordIdx);
+    const end = first + Number(wordEl.dataset.wordCount ?? 1);
+    wordEl.classList.toggle("word--spoken", end <= at);
+    wordEl.classList.toggle("word--current", first <= at && at < end);
   }
 }
 
@@ -953,8 +938,12 @@ async function startAudio(): Promise<boolean> {
     processor.port.onmessage = (e: MessageEvent) => {
       const samples = new Float32Array(e.data as ArrayBuffer);
       if (practicePending || (correctionState && correctionState.phase !== 'idle' && correctionState.phase !== 'retrying')) return;
-      // Save copy to session buffer
+      // Keep a bounded copy for the report dialog.
       state.sessionAudioChunks.push(samples.slice());
+      state.sessionAudioSamples += samples.length;
+      while (state.sessionAudioSamples - state.sessionAudioChunks[0].length >= MAX_REPORT_AUDIO_SAMPLES) {
+        state.sessionAudioSamples -= state.sessionAudioChunks.shift()!.length;
+      }
       // Send to worker for recognition
       if (state.worker) {
         state.worker.postMessage(
@@ -1101,10 +1090,9 @@ function bindControls(): void {
     $recordingState.hidden = true;
     $recordingActions.hidden = true;
     $postRecording.hidden = true;
-    _matchedWordIndices.clear();
-    _trackingKey = "";
     $listeningStatus.hidden = true;
     state.sessionAudioChunks = [];
+    state.sessionAudioSamples = 0;
     state.lastModelPrediction = null;
     state.hasFirstMatch = false;
     applyLanguage();
@@ -1163,6 +1151,7 @@ function bindControls(): void {
 
   $btnRestart.addEventListener("click", () => {
     state.sessionAudioChunks = [];
+    state.sessionAudioSamples = 0;
     state.lastModelPrediction = null;
     state.hasFirstMatch = false;
     applyLanguage();

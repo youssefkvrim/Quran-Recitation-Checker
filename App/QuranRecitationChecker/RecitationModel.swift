@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import RecitationKit
 import UIKit
+import os
 
 /// UI state for one screen: follows the engine's events and drives the microphone.
 @MainActor
@@ -57,7 +58,16 @@ final class RecitationModel {
     }
   }
 
+  /// The hidden performance readout (long-press the status line).
+  var showsPerformance: Bool {
+    didSet {
+      UserDefaults.standard.set(showsPerformance, forKey: Self.performanceKey)
+      UIDevice.current.isBatteryMonitoringEnabled = showsPerformance
+    }
+  }
+
   private static let modeKey = "recitation-mode"
+  private static let performanceKey = "performance-readout"
   private let service = RecognitionService()
   private let microphone = MicrophoneCapture()
   private var listening: Task<Void, Never>?
@@ -65,9 +75,13 @@ final class RecitationModel {
   private var transitioning = false
   private var stopping = false
   private var interruptionObserver: NSObjectProtocol?
+  /// Battery level at the start and end of the last recitation, for the readout.
+  private var battery: (start: ContinuousClock.Instant, level: Float, end: ContinuousClock.Instant?, endLevel: Float)?
 
   init() {
     mode = RecitationMode(rawValue: UserDefaults.standard.string(forKey: Self.modeKey) ?? "") ?? .tracking
+    showsPerformance = UserDefaults.standard.bool(forKey: Self.performanceKey)
+    UIDevice.current.isBatteryMonitoringEnabled = showsPerformance
   }
 
   var isListening: Bool { phase == .listening }
@@ -109,6 +123,7 @@ final class RecitationModel {
     }
     phase = .listening
     UIApplication.shared.isIdleTimerDisabled = true
+    battery = (ContinuousClock.now, UIDevice.current.batteryLevel, nil, 0)
     // A call or another app taking the microphone ends the recitation.
     interruptionObserver = NotificationCenter.default.addObserver(
       forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
@@ -121,7 +136,7 @@ final class RecitationModel {
       for await chunk in stream {
         self.level = chunk.level
         do {
-          self.apply(try await service.feed(chunk.samples))
+          self.apply(try await service.feed(chunk.samples, capturedAt: chunk.captured))
         } catch {
           // Inference failed: release the microphone and say so.
           self.microphone.stop()
@@ -144,6 +159,8 @@ final class RecitationModel {
     if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
     interruptionObserver = nil
     UIApplication.shared.isIdleTimerDisabled = false
+    battery?.end = ContinuousClock.now
+    battery?.endLevel = UIDevice.current.batteryLevel
     level = 0
     phase = .ready
     do {
@@ -158,6 +175,62 @@ final class RecitationModel {
     acting = true
     apply(await service.correct(action))
     acting = false
+  }
+
+  // MARK: - Performance readout
+
+  /// The readout's text for the current (or last) recitation.
+  func performanceReport() async -> String {
+    let profile = await service.profile
+    let stats = profile.stats
+    func line(_ name: String, _ summary: PerformanceStats.Summary?, _ unit: String) -> String {
+      guard let s = summary else { return "\(name)  –" }
+      return String(format: "%@  p50 %5.1f  p95 %5.1f  max %5.1f %@", name, s.p50, s.p95, s.max, unit)
+    }
+    let cpu = stats.realTimeFactor.map {
+      String(format: "CPU     %.1f%% of real time · %ld windows · %.0f s audio", $0 * 100, stats.runs, stats.audioSeconds)
+    } ?? "CPU     –"
+    return [
+      line("Model ", stats.model, "ms/480ms"),
+      line("Engine", stats.engine, "ms/480ms"),
+      line("Lag   ", stats.lag, "ms"),
+      cpu,
+      "Device  thermal \(Self.thermalState) · battery \(batteryTrend) · memory left \(Self.memoryHeadroom)",
+      String(format: "Load    %.2f s · warm-up %.0f ms · %@ · iOS %@",
+             profile.loadSeconds, profile.warmUpSeconds * 1000, Self.deviceModel, UIDevice.current.systemVersion),
+    ].joined(separator: "\n")
+  }
+
+  private var batteryTrend: String {
+    let device = UIDevice.current
+    if device.batteryState == .charging || device.batteryState == .full { return "charging" }
+    guard let battery, battery.level >= 0 else { return "–" }
+    let end = battery.end ?? .now
+    let level = battery.end == nil ? device.batteryLevel : battery.endLevel
+    let components = (end - battery.start).components
+    let minutes = (Double(components.seconds) + Double(components.attoseconds) * 1e-18) / 60
+    guard level >= 0, minutes >= 1 else { return "measuring" }
+    return String(format: "−%.1f%%/10 min over %.0f min", (battery.level - level) * 100 / minutes * 10, minutes)
+  }
+
+  private static var thermalState: String {
+    switch ProcessInfo.processInfo.thermalState {
+    case .nominal: "nominal"
+    case .fair: "fair"
+    case .serious: "serious"
+    case .critical: "critical"
+    @unknown default: "unknown"
+    }
+  }
+
+  private static var memoryHeadroom: String {
+    String(format: "%.0f MB", Double(os_proc_available_memory()) / 1_048_576)
+  }
+
+  private static var deviceModel: String {
+    var info = utsname()
+    uname(&info)
+    return withUnsafeBytes(of: info.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
   }
 
   // MARK: - Events

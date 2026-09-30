@@ -97,6 +97,11 @@ public final class RecitationSession {
 
   public var engineState: EngineState { engine.state }
 
+  /// Wall-clock time spent in the acoustic model since creation, and how many
+  /// 480 ms windows it ran. Time `feed` around it to get the engine's share.
+  public var modelTime: Duration { runner.modelTime }
+  public var modelRuns: Int { runner.modelRuns }
+
   /// Latest per-word verdicts of the active tracker (diagnostics).
   public func verdicts() -> [WordVerdict] {
     (practiceEngine ?? engine).tracer?.verdicts(settled: false) ?? []

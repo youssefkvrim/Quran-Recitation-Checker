@@ -14,10 +14,21 @@ actor RecognitionService {
     }
   }
 
+  /// What the performance readout shows about recognition.
+  struct Profile: Sendable {
+    var stats = PerformanceStats()
+    /// Seconds to load the display text, corpus, index and model.
+    var loadSeconds = 0.0
+    /// Seconds for the warm-up run, the slowest one.
+    var warmUpSeconds = 0.0
+  }
+
   private var session: RecitationSession?
+  private(set) var profile = Profile()
 
   /// Load the model, corpus and display text. Takes about a second on device.
   func load() throws -> QuranText {
+    let start = ContinuousClock.now
     func resource(_ name: String, _ ext: String) throws -> URL {
       guard let url = Bundle.main.url(forResource: name, withExtension: ext) else { throw Failure.missingResource("\(name).\(ext)") }
       return url
@@ -26,11 +37,14 @@ actor RecognitionService {
     let corpus = try QuranCorpus(json: Data(contentsOf: resource("zipformer_quran", "json")))
     let backend = try OnnxZipformerBackend(modelPath: resource("zipformer_interp_gentle_a05.int8", "onnx").path)
     // Warm up so the first real window is not the slow one.
+    let warmUp = ContinuousClock.now
     _ = try backend.run(features: [Float](repeating: 0, count: ZipformerIO.shipped.windowFrames * ZipformerIO.shipped.featureDim))
+    profile.warmUpSeconds = Self.seconds(ContinuousClock.now - warmUp)
     backend.reset()
     var options = RecitationSession.Options()
     options.emitRawTranscript = false
     session = RecitationSession(corpus: corpus, backend: backend, options: options)
+    profile.loadSeconds = Self.seconds(ContinuousClock.now - start)
     return text
   }
 
@@ -38,11 +52,19 @@ actor RecognitionService {
   func begin(mode: RecitationMode) -> [RecitationEvent] {
     guard let session else { return [] }
     session.reset()
+    profile.stats = PerformanceStats()
     return session.setMode(mode)
   }
 
-  func feed(_ samples: [Float]) throws -> [RecitationEvent] {
-    try session?.feed(samples) ?? []
+  func feed(_ samples: [Float], capturedAt captured: ContinuousClock.Instant) throws -> [RecitationEvent] {
+    guard let session else { return [] }
+    let modelTime = session.modelTime, modelRuns = session.modelRuns
+    let start = ContinuousClock.now
+    let events = try session.feed(samples)
+    let end = ContinuousClock.now
+    profile.stats.record(audioSamples: samples.count, feed: end - start, model: session.modelTime - modelTime,
+                         runs: session.modelRuns - modelRuns, lag: end - captured)
+    return events
   }
 
   /// End of recitation: flush the model tail and get the final sequence.
@@ -60,5 +82,9 @@ actor RecognitionService {
 
   func correct(_ action: CorrectionAction) -> [RecitationEvent] {
     session?.correct(action) ?? []
+  }
+
+  private static func seconds(_ d: Duration) -> Double {
+    Double(d.components.seconds) + Double(d.components.attoseconds) * 1e-18
   }
 }

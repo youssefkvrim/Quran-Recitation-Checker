@@ -92,22 +92,32 @@ final class MicrophoneCapture: @unchecked Sendable {
     let ratio = target.sampleRate / buffer.format.sampleRate
     let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 64
     guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
-    var supplied = false
+    let input = PendingInput(buffer)
     var error: NSError?
     // `.noDataNow` (not end-of-stream) keeps the resampler's history for the next buffer.
     _ = converter.convert(to: out, error: &error) { _, status in
-      if supplied {
+      guard let next = input.take() else {
         status.pointee = .noDataNow
         return nil
       }
-      supplied = true
       status.pointee = .haveData
-      return buffer
+      return next
     }
     guard error == nil, out.frameLength > 0, let channel = out.floatChannelData?[0] else { return }
     let samples = Array(UnsafeBufferPointer(start: channel, count: Int(out.frameLength)))
     var energy: Float = 0
     for s in samples { energy += s * s }
     continuation.yield(Chunk(samples: samples, level: (energy / Float(samples.count)).squareRoot(), captured: captured))
+  }
+}
+
+/// The tap's buffer, handed to the converter once. The converter calls its
+/// input block synchronously inside `convert`, so no lock is needed.
+private final class PendingInput: @unchecked Sendable {
+  private var buffer: AVAudioPCMBuffer?
+  init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
+  func take() -> AVAudioPCMBuffer? {
+    defer { buffer = nil }
+    return buffer
   }
 }

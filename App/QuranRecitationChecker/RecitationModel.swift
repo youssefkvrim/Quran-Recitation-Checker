@@ -210,7 +210,8 @@ final class RecitationModel {
     let components = (end - battery.start).components
     let minutes = (Double(components.seconds) + Double(components.attoseconds) * 1e-18) / 60
     guard level >= 0, minutes >= 1 else { return "measuring" }
-    return String(format: "−%.1f%%/10 min over %.0f min", (battery.level - level) * 100 / minutes * 10, minutes)
+    let percentDrop = Double(battery.level - level) * 100
+    return String(format: "−%.1f%%/10 min over %.0f min", percentDrop / minutes * 10, minutes)
   }
 
   private static var thermalState: String {

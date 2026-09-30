@@ -1,108 +1,57 @@
-# Tilawa
+# Quran Recitation Checker
 
-Offline Quran verse recognition — give it 16kHz audio, get `surah:ayah`. Fully on-device (web / node / React Native).
-
-This repo ships two things:
-
-- **`@tilawa/core`** (`packages/core/`) — the SDK. Pure TypeScript, zero native deps. Default engine: streaming Zipformer2-CTC over tajweed phonemes (`src/recitation/`). Alternate engine: FastConformer text CTC. The app dev passes in their `onnxruntime` build; the SDK never imports it.
-- **Web demo** (`web/`) — live browser recitation demo that consumes `@tilawa/core` as its regression guard.
-
-The Python research/training/benchmark harness lives under `lab/` and has its own `lab/AGENTS.md`. Model weights are proven out there, then their logic graduates into the SDK.
+Offline iPhone app that follows a Quran recitation word by word and flags mistakes. Everything runs on device.
 
 ## Layout
 
 ```
-packages/core/     # @tilawa/core SDK (the shipped product)
-  src/
-    index.ts             # createRecognitionSession (engine switch), createTilawaSession, TilawaAssets
-    recitation/          # default Zipformer engine
-      session.ts         #   ZipformerSession / createZipformerSession — {ort, model} or {session, Tensor}
-      zipformerRunner.ts #   ONNX I/O over the injected ort namespace
-      fbank.ts, ctcDecoder.ts, search.ts, tracker.ts, engine.ts, emission.ts, correction.ts, ...
-      zipformer-io.json  #   bundled I/O manifest (DEFAULT_ZIPFORMER_IO)
-    session.ts           # SessionRunner seam — FastConformer only (type-only, no onnxruntime)
-    quran-db.ts          # QuranDB — display text + FastConformer verse matching
-    tracker.ts, text-ctc-decode.ts, quran-text-adapter.ts, ctc-rescore.ts  # FastConformer pipeline
-    levenshtein.ts, normalizer.ts, types.ts  # shared helpers + WorkerOutbound event union
-  test/                  # deterministic vitest (no ONNX)
-  examples/
-    browser/index.html   # no-bundler page: import map -> dist + onnxruntime-web, file + mic input
-    browser/test.mjs     # headless Chromium regression over test_corpus (npm run test:browser)
-    session-*.ts, react-native.md  # copy-paste runtime adapters
-web/                     # live browser demo (Vite + worker), consumes @tilawa/core src
-  frontend/src/worker/zipformer-backend.ts  # the web Zipformer host (onnxruntime-web)
-  frontend/scripts/fetch-zipformer-assets.sh  # model + corpus -> public/ (gitignored, NPL-1.2)
-lab/                     # Python research/training/benchmark harness — see lab/AGENTS.md
-.github/workflows/ci.yml # core (vitest), browser (test:browser), demo (build)
-README.md, Dockerfile, LICENSE
+RecitationKit/                    # Swift package: the engine (pure Swift, no UI, no ONNX)
+  Sources/RecitationKit/
+    Session.swift                 #   RecitationSession: feed / stop / reset / setMode / correct -> [RecitationEvent]
+    Fbank.swift, CtcDecoder.swift #   audio features, greedy CTC with peak margins + sibling vowels
+    ZipformerRunner.swift         #   windowing over a ZipformerBackend (the app supplies ONNX)
+    Search.swift, Tracker.swift, Verdicts.swift, Engine.swift   # locate, track, judge
+    Emission.swift, Fallback.swift, Correction.swift            # host events, tallies, live correction
+    Corpus.swift, QuranText.swift #   phoneme corpus, display text + display->acoustic word mapping
+    *.generated.swift             #   tools/generate-swift-tables.py, do not edit
+  Tests/RecitationKitTests/       # Swift Testing; Fixtures/sessions.json = v0.1 golden streams
+App/                              # SwiftUI app, XcodeGen project.yml (the .xcodeproj is generated, ignored)
+  QuranRecitationChecker/
+    Audio/MicrophoneCapture.swift         # AVAudioEngine -> 16 kHz chunks
+    Recognition/OnnxZipformerBackend.swift  # ONNX Runtime (ObjC API) ZipformerBackend
+    Recognition/RecognitionService.swift    # actor owning the session
+    RecitationModel.swift                   # @MainActor @Observable UI state
+    Views/                                  # ContentView, PassageView, CorrectionSheet
+spec/                             # recitation-engine-spec.md, live-correction.md, vectors/ (frozen oracles)
+tools/                            # fetch-assets.sh, swift.sh, generate-swift-tables.py, make-golden.mts, make-quran-text.py
+assets/                           # model + corpus from tools/fetch-assets.sh (NPL-1.2, gitignored)
 ```
 
-`README.md` at the root is the SDK's published README. `packages/core/README.md` is a gitignored copy made by `npm run sync-docs` at pack time; edit the root file.
-
-## SDK architecture
-
-```mermaid
-graph LR
-  dev[App dev] -->|"ort + model bytes + corpus"| zf["createRecognitionSession (Zipformer)"]
-  zf --> core["fbank -> Zipformer CTC -> n-gram search + DP tracker"]
-  core --> events["WorkerOutbound: verse_candidate / verse_match / word_progress / final_sequence"]
-```
-
-- **Zipformer (default)** — the app passes the `ort` namespace plus model bytes (web/node), or an already-created `session` plus `Tensor` (React Native, where sessions load from a path). The SDK builds the ONNX session, runs Kaldi fbank in TS, and feeds the streaming Zipformer. The phoneme corpus (`zipformer_quran.json`) is required and not bundled. `quran.json` is display text only.
-- **FastConformer (alternate)** — the app writes a `SessionRunner`: input `audio_signal [1,N]` float32 + `length`, output `[1,T,vocab]` logprobs, preprocessing in-graph. Needs `{ vocab, quranCtcTokens, quran }` assets.
-
-Both engines emit the same `WorkerOutbound` union through `onEvent` / `onOutput` and as the return value of `feed()` / `stop()`.
-
-### Public surface (`@tilawa/core`)
-
-- `createRecognitionSession(options) -> RecognitionSession`: `feed(chunk)`, `stop()` / `flush()`, `reset()`, `engine`, `zipformer`, `fastconformer`. `engine` defaults to `"zipformer"`.
-- `createZipformerSession(options) -> ZipformerSession`: adds `transcript`, `verses`, `verdicts()`, `setMode()`, `correct()`, `engineState`. Options: `ort`+`model` or `session`+`Tensor`, `corpus`, `quran?`, `io?`, `executionProviders?`, `onEvent?`, tuning knobs.
-- `createTilawaSession(runner, assets, options?) -> TilawaSession` (FastConformer): `transcribe()`, `transcribeRaw()`, `feed()`, `reset()`, `setConfig()`, `getConfig()`, `db`, `decoder`.
-- Types: `WorkerOutbound` and its message types, `SessionRunner`, `SessionOutput`, `TilawaAssets`, `TilawaPrediction`, `StreamingConfig` + presets, `QuranVerse`, `QuranDB`.
-
-`feed`, `stop` and `reset` on one session must never overlap: they share the streaming encoder state. Serialize them (a promise queue is enough).
-
-## Build & test the SDK
+## Build & test
 
 ```bash
-cd packages/core
-npm install                # `prepare` builds dist/
-npx vitest run             # deterministic tests (no ONNX)
-npm run test:browser       # rebuilds dist, runs examples/browser in headless Chromium
+tools/fetch-assets.sh                          # once; the tests and the app need assets/
+cd RecitationKit && swift test                 # macOS
+tools/swift.sh test                            # Linux (Docker, swift:6.2-noble)
+RUN_PERF=1 tools/swift.sh test -c release --filter Performance
+cd App && xcodegen generate                    # then build/run QuranRecitationChecker in Xcode
 ```
 
-`test:browser` needs the model + corpus in `web/frontend/public` (`web/frontend/scripts/fetch-zipformer-assets.sh`) and a Playwright browser (`npx playwright install chromium`, or `PW_CHANNEL=chrome` to use installed Chrome). `-- --all` runs every mp3/wav sample in `lab/benchmark/test_corpus`.
+The suite must be green before merge. CI (`.github/workflows/ci.yml`) runs it on Linux, then builds the app for the iOS simulator on macOS.
 
-`vitest` and `test:browser` must be green before merge. CI (`.github/workflows/ci.yml`) runs both plus the demo build.
+## Engine rules
 
-## Run the web demo
+- **Behaviour is pinned.** `SpecVectorTests` match `spec/vectors/` bit for bit. `GoldenSessionTests` replay the v0.1 TypeScript engine's event streams. An optimisation must leave both untouched. For a deliberate behaviour change, update the spec, regenerate `Fixtures/sessions.json` (`tools/make-golden.mts` against the reference implementation), and explain the event diff in the commit body.
+- **Float semantics.** Compute in `Double` and store in `Float`, which mirrors JS `Math.fround` on `Float32Array` writes. Sort with `stableSorted(by:)`, and iterate maps where insertion order matters (`TallyMap`). Split Arabic text on unicode scalars, not `Character`s.
+- **One caller at a time.** `feed`, `stop` and `reset` share the streaming encoder state, so they must never overlap. In the app, `RecognitionService` (an actor) serialises them.
+- **Hot path.** `feed` runs every 480 ms on device. Keep it allocation-light and incremental. `IncrementalTests` check that caches equal from-scratch recomputation; add to them when you add a cache.
+- Add a deterministic test that needs no ONNX with every engine change.
 
-The demo is the SDK's regression guard: if it still recognizes recitation against `@tilawa/core`, the SDK is correct.
+## App rules
 
-```bash
-cd web/frontend
-npm install
-npm run dev                # vite dev server
-npm run build              # tsc && vite build
-npm run build:server && npm run start   # bundled node server (dist-server/index.mjs)
-```
-
-`Dockerfile` at the root builds and serves this demo.
-
-### Streaming validation
-
-```bash
-cd web/frontend
-npm run test:streaming            # Zipformer recordings, one run
-npm run test:streaming:matrix     # three repeated runs
-npm run test:correction           # tracking + correction recording regression
-```
-
-## Making changes
-
-- **SDK core change** (decode / matcher / tracker) → edit `packages/core/src/`. Add/extend a `packages/core/test/*.test.ts` that deterministically exercises it without ONNX. `npx vitest run` stays green. If the change touches the Zipformer engine, the public API, or the build output, run `npm run test:browser` too.
-- **Demo change** → edit `web/frontend/src/`. Verify `npm run build` typechecks and the demo still recognizes recitation.
-- **New model / matching strategy / training** → that's lab work. See `lab/AGENTS.md`. Nothing in `lab/` may import from `packages/` or `web/`, and vice versa.
+- Keep the UI minimal: the passage, one record button and a mode picker, plus the correction sheet.
+- Audio and recognition never leave the device, and the app makes no network calls.
+- The model and corpus are NPL-1.2. Never commit them, and never gate a feature they power behind payment.
 
 ## Worktree + merge discipline
 
@@ -111,10 +60,10 @@ Develop every change in a worktree under `./.worktrees/`, then merge back with `
 ```bash
 git worktree add .worktrees/<name> -b <name>
 cd .worktrees/<name>
-# ... implement, test (vitest + test:browser + demo build) ...
-git commit                 # subject: "<area>: <what changed>" (≤72 chars); body: the why + before/after
+# ... implement, test ...
+git commit                 # subject: "<area>: <what changed>" (<=72 chars); body: the why + before/after
 git merge <name> --no-ff -m "Merge branch '<name>': ..."
 git worktree remove .worktrees/<name>
 ```
 
-Never skip hooks or bypass signing.
+Commits are authored as the repository owner, with no co-author trailers. Never skip hooks or bypass signing.

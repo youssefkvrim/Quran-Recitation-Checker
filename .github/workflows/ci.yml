@@ -10,76 +10,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  core:
+  # The recognition engine on Linux: spec vectors, v0.1 parity, word mapping.
+  engine:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/core
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: packages/core/package-lock.json
       - uses: actions/cache@v4
-        id: zipformer
         with:
           key: zipformer-assets-v0.3.0
-          path: |
-            web/frontend/public/models/zipformer_interp_gentle_a05.int8.onnx
-            web/frontend/public/zipformer_quran.json
-      - if: steps.zipformer.outputs.cache-hit != 'true'
-        run: ../../web/frontend/scripts/fetch-zipformer-assets.sh
-      - run: npm ci # `prepare` runs tsc -> dist
-      - run: npx vitest run
+          path: assets
+      - run: tools/fetch-assets.sh
+      - run: tools/swift.sh test
 
-  browser:
-    runs-on: ubuntu-latest
+  # The iOS app: generate the project and build for the simulator.
+  ios:
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: maxim-lobanov/setup-xcode@v1
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: packages/core/package-lock.json
+          xcode-version: latest-stable
       - uses: actions/cache@v4
-        id: zipformer
         with:
           key: zipformer-assets-v0.3.0
-          path: |
-            web/frontend/public/models/zipformer_interp_gentle_a05.int8.onnx
-            web/frontend/public/zipformer_quran.json
-      - if: steps.zipformer.outputs.cache-hit != 'true'
-        run: web/frontend/scripts/fetch-zipformer-assets.sh
-      - run: npm ci
-        working-directory: packages/core
-      - run: npx playwright install --with-deps chromium
-        working-directory: packages/core
-      - run: npm run test:browser
-        working-directory: packages/core
-
-  demo:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web/frontend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/frontend/package-lock.json
-      - uses: actions/cache@v4
-        id: zipformer
-        with:
-          key: zipformer-assets-v0.3.0
-          path: |
-            web/frontend/public/models/zipformer_interp_gentle_a05.int8.onnx
-            web/frontend/public/zipformer_quran.json
-      - if: steps.zipformer.outputs.cache-hit != 'true'
-        run: scripts/fetch-zipformer-assets.sh
-      - run: npm ci
-      - run: npm test # the corpus lets quran-words check every ayah's word mapping
-      - run: npm run build
+          path: assets
+      - run: tools/fetch-assets.sh
+      - run: swift test
+        working-directory: RecitationKit
+        env:
+          ZIPFORMER_CORPUS: ${{ github.workspace }}/assets/zipformer_quran.json
+      - run: brew install xcodegen
+      - run: xcodegen generate
+        working-directory: App
+      - run: >
+          xcodebuild -project QuranRecitationChecker.xcodeproj -scheme QuranRecitationChecker
+          -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+        working-directory: App

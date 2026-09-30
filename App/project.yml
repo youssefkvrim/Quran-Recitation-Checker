@@ -1,0 +1,62 @@
+# Xcode project for the iOS app. Generate it with XcodeGen:
+#   brew install xcodegen && cd App && xcodegen generate && open QuranRecitationChecker.xcodeproj
+# Model + corpus come from ../assets (tools/fetch-assets.sh).
+name: QuranRecitationChecker
+options:
+  bundleIdPrefix: com.youssefkarim
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+packages:
+  RecitationKit:
+    path: ../RecitationKit
+  onnxruntime:
+    url: https://github.com/microsoft/onnxruntime-swift-package-manager
+    from: "1.24.0"
+targets:
+  QuranRecitationChecker:
+    type: application
+    platform: iOS
+    sources:
+      - path: QuranRecitationChecker
+      # NPL-1.2 assets, not committed: tools/fetch-assets.sh puts them here.
+      - path: ../assets/zipformer_interp_gentle_a05.int8.onnx
+        buildPhase: resources
+        optional: true
+      - path: ../assets/zipformer_quran.json
+        buildPhase: resources
+        optional: true
+    # A shared scheme, so `xcodebuild -scheme` works on a fresh checkout (CI).
+    scheme: {}
+    dependencies:
+      - package: RecitationKit
+      - package: onnxruntime
+        product: onnxruntime
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Quran Recitation Checker
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.education
+        NSMicrophoneUsageDescription: Your recitation is recognised on this iPhone. Audio is never stored or sent anywhere.
+        UIAppFonts: [Amiri-Regular.ttf, Amiri-Bold.ttf]
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.youssefkarim.QuranRecitationChecker
+        PRODUCT_NAME: QuranRecitationChecker
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic

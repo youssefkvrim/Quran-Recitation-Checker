@@ -37,11 +37,11 @@ import { DEFAULT_CONFIG, SAMPLE_RATE, type EngineConfig } from "./config.js";
 import { GreedyCtcDecoder } from "./ctcDecoder.js";
 import { KaldiFbank } from "./fbank.js";
 import { QuranCorpus } from "./corpus.js";
-import { QuranIndex, stripPreambles } from "./search.js";
+import { QuranIndex } from "./search.js";
 import { RecitationEngine } from "./engine.js";
+import { wholeAyahFallback } from "./fallback.js";
 import { BLANK_ID, TOKENS } from "./tokens.js";
 import { costTable } from "./phonemeCost.js";
-import { normalizedDistance } from "./alignment.js";
 import type { EngineEvent, FallbackHit, WordVerdict } from "./types.js";
 import {
   ZipformerRunner,
@@ -75,12 +75,6 @@ export type QuranSource =
   | QuranDB
   | unknown[]
   | (() => unknown[] | QuranDB | Promise<unknown[] | QuranDB>);
-
-interface EncodedAyah {
-  surah: number;
-  ayah: number;
-  ids: Uint8Array;
-}
 
 async function resolveSource<T>(src: T | (() => T | Promise<T>)): Promise<T> {
   return typeof src === "function" ? (src as () => T | Promise<T>)() : src;
@@ -180,7 +174,6 @@ export class ZipformerSession {
   private readonly corpus: QuranCorpus;
   private readonly index: QuranIndex;
   private readonly table = costTable();
-  private readonly ayahIds: EncodedAyah[] = [];
   private readonly quranDb: QuranDB;
   private readonly runner: ZipformerRunner;
   private readonly cfg: EngineConfig;
@@ -197,8 +190,10 @@ export class ZipformerSession {
   private engine: RecitationEngine;
   private accumulated = new Map<string, AyahTally>();
   private emitted = new Set<string>();
-  private transcriptParts: string[] = [];
+  private transcriptText = "";
   private lastCursor: { surah: number; ayah: number; word: number } | null = null;
+  /** Last `word_progress` sent; an identical one is not sent again (see `wordProgress`). */
+  private lastWordProgress: string | null = null;
   /** Last `verse_match` emitted by the current tracker lock. Cleared on
    * locate / relocate / lost so an ayah gap across a jump never flags. */
   private lastMatch: { surah: number; ayah: number } | null = null;
@@ -229,17 +224,6 @@ export class ZipformerSession {
     this.debugEnabled = opts.debug ?? false;
     this.corpus = new QuranCorpus(corpusJson);
     this.index = new QuranIndex(this.corpus, this.cfg);
-    for (const s of this.corpus.surahs) {
-      for (let a = 1; a <= s.ayahCount; a++) {
-        const first = this.corpus.ayahFirstWord(s.n, a);
-        const end = first + this.corpus.ayahWordCount(s.n, a);
-        this.ayahIds.push({
-          surah: s.n,
-          ayah: a,
-          ids: this.table.encode(this.corpus.text.slice(this.corpus.wordStart[first], this.corpus.wordStart[end])),
-        });
-      }
-    }
     this.engine = this.makeEngine();
   }
 
@@ -287,7 +271,7 @@ export class ZipformerSession {
 
   /** Raw phoneme transcript accumulated since the last `reset()`. */
   get transcript(): string {
-    return this.transcriptParts.join("");
+    return this.transcriptText;
   }
 
   /** `"searching"` until the engine locks onto a position, then `"tracking"`. */
@@ -304,7 +288,8 @@ export class ZipformerSession {
    * engine). Empty before the recitation is located. Diagnostic use only. */
   verdicts(): WordVerdict[] {
     const engine = this.practiceEngine ?? this.engine;
-    return engine.tracer?.verdicts(false) ?? [];
+    // The tracer's result is shared with the engine; hand out a copy.
+    return engine.tracer?.verdicts(false).slice() ?? [];
   }
 
   /** Drop all state — new recitation, same model and corpus. */
@@ -313,8 +298,9 @@ export class ZipformerSession {
     this.practiceEngine = null;
     this.accumulated = new Map();
     this.emitted = new Set();
-    this.transcriptParts = [];
+    this.transcriptText = "";
     this.lastCursor = null;
+    this.lastWordProgress = null;
     this.lastMatch = null;
     this.ayahIssuesRaised = new Set();
     this.lastFallback = null;
@@ -459,10 +445,8 @@ export class ZipformerSession {
     this.corpus.ayahWordCount(surah, ayah);
 
   private dumpTallies(): void {
-    const tracer = this.engine.tracer;
-    if (!tracer) return;
-    const snap = snapshotTallies(tracer.verdicts(true) as EmissionVerdict[], this.wordCount);
-    accumulateSnapshot(this.accumulated, snap);
+    if (!this.engine.tracer) return;
+    accumulateSnapshot(this.accumulated, this.currentSnapshot());
   }
 
   private currentSnapshot(): Map<string, AyahTally> {
@@ -472,6 +456,13 @@ export class ZipformerSession {
   }
 
   private dispatch(messages: WorkerOutbound[]): WorkerOutbound[] {
+    // Anything the UI draws from besides word_progress (a verse match can move
+    // the highlighted ayah) means the next word_progress must go out again.
+    for (const msg of messages) {
+      if (msg.type !== "word_progress" && msg.type !== "raw_transcript" && msg.type !== "debug") {
+        this.lastWordProgress = null;
+      }
+    }
     if (this.onEvent) for (const msg of messages) this.onEvent(msg);
     return messages;
   }
@@ -503,13 +494,15 @@ export class ZipformerSession {
       } else this.correction.clearEvidence();
       return out;
     }
-    for (const t of tokens) this.transcriptParts.push(t.sym);
+    for (const t of tokens) this.transcriptText += t.sym;
     for (const ev of this.engine.feed(tokens, this.decoder.framesDecoded)) {
       out.push(...this.handle(ev));
     }
     out.push(...this.emitNewMatches());
     const tracker = this.engine.tracker;
-    if (!this.stopping && this.engine.tracer && tracker && !tracker.lost && this.lastCursor
+    // Tracking mode never flags: skip the (non-settled) verdict trace entirely.
+    if (this.correction.mode === "correction" && !this.stopping && this.engine.tracer && tracker
+      && !tracker.lost && this.lastCursor
       && (tracker.costRate(this.cfg.holdWindow) ?? 0) < this.cfg.holdRate) {
       const last = tracker.heard[tracker.heard.length - 1];
       const settled = !!last && this.decoder.framesDecoded - last.frame >= this.cfg.settleFrames;
@@ -531,16 +524,17 @@ export class ZipformerSession {
 
   private handle(ev: EngineEvent): WorkerOutbound[] {
     const out: WorkerOutbound[] = [];
+    if (ev.type !== "cursor" && ev.type !== "verdicts") this.lastWordProgress = null;
     switch (ev.type) {
       case "cursor": {
         if (ev.surah != null && ev.ayah != null && ev.word != null) {
           this.lastCursor = { surah: ev.surah, ayah: ev.ayah, word: ev.word };
-          out.push(this.wordProgress());
+          out.push(...this.wordProgress());
         }
         break;
       }
       case "verdicts": {
-        if (this.lastCursor) out.push(this.wordProgress());
+        if (this.lastCursor) out.push(...this.wordProgress());
         break;
       }
       case "lost": {
@@ -598,11 +592,20 @@ export class ZipformerSession {
     return out;
   }
 
-  private wordProgress(): WorkerOutbound {
+  /**
+   * The cursor ayah's progress, or nothing when it is identical to the last
+   * one sent: a verdict change elsewhere (an earlier ayah settling) or a cursor
+   * and a verdict event in the same chunk would otherwise repeat it.
+   */
+  private wordProgress(): WorkerOutbound[] {
     const cursor = this.lastCursor!;
     const tracer = this.engine.tracer;
     const verdicts = (tracer ? tracer.verdicts(true) : []) as EmissionVerdict[];
-    return wordProgressFromCursor(cursor, verdicts, this.wordCount(cursor.surah, cursor.ayah));
+    const msg = wordProgressFromCursor(cursor, verdicts, this.wordCount(cursor.surah, cursor.ayah));
+    const key = `${msg.surah}:${msg.ayah}:${msg.word_index}:${msg.total_words}:${msg.matched_indices.join(",")}`;
+    if (key === this.lastWordProgress) return [];
+    this.lastWordProgress = key;
+    return [msg];
   }
 
   private emitNewMatches(source?: Map<string, AyahTally>): WorkerOutbound[] {
@@ -668,21 +671,7 @@ export class ZipformerSession {
   }
 
   private fallbackSearch(text: string): FallbackHit | null {
-    if (!text) return null;
-    const stripped = stripPreambles(text, this.table);
-    const rest = text.slice(stripped.offset);
-    if (stripped.basmala && rest.length < this.cfg.searchMinChars) {
-      return { surah: 1, ayah: 1, distance: 0, how: "basmala" };
-    }
-    const q = this.table.encode(rest.length >= 3 ? rest : text);
-    let best: FallbackHit | null = null;
-    for (const a of this.ayahIds) {
-      if (a.ids.length > 2.5 * q.length + 8 || q.length > 2.5 * a.ids.length + 8) continue;
-      const d = normalizedDistance(q, a.ids, this.table);
-      if (!best || d < best.distance) best = { surah: a.surah, ayah: a.ayah, distance: d, how: "whole-ayah" };
-    }
-    if (!best || best.distance > this.fallbackMaxDistance) return null;
-    return best;
+    return wholeAyahFallback(text, this.corpus, this.table, this.cfg.searchMinChars, this.fallbackMaxDistance);
   }
 }
 

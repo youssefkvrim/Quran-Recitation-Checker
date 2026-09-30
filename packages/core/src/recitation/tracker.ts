@@ -3,9 +3,13 @@ import type { QuranCorpus } from "./corpus.js";
 import type { CostTable } from "./phonemeCost.js";
 import type { HeardChar } from "./types.js";
 
-const SNAPSHOT_EVERY = 32;
-const SNAPSHOT_KEEP = 16;
 const RATE_MIN_N = 24;
+
+function columnMin(column: Float32Array): number {
+  let min = column[0]!;
+  for (let m = 1; m < column.length; m++) if (column[m]! < min) min = column[m]!;
+  return min;
+}
 
 export class Tracker {
   readonly corpus: QuranCorpus;
@@ -31,15 +35,10 @@ export class Tracker {
   readonly costs: number[] = [];
   readonly heard: HeardChar[] = [];
   lost = false;
-
-  private readonly snapshots: Array<{
-    length: number;
-    column: Float32Array;
-    cursorCell: number;
-    cursorLocalWord: number;
-    cursorCost: number;
-    lost: boolean;
-  }> = [];
+  /** Second column buffer: `feedOne` writes here, then swaps it with `column`. */
+  private spare: Float32Array;
+  /** min(column). After a feed this is the new cursorCost (the column argmin). */
+  private colMin: number;
 
   constructor(
     corpus: QuranCorpus,
@@ -79,18 +78,12 @@ export class Tracker {
     );
     // Float32 store: events_ea_alafasy_multi cursor.cost / alignment.json.
     this.column = new Float32Array(this.len + 1);
-    this.column.fill(Number.POSITIVE_INFINITY);
-    const jump = cfg.jumpCost;
-    for (let i = 0; i < nWords; i++) {
-      const m = this.wordStarts[i]!;
-      this.column[m] = m === this.startLocal ? 0 : jump;
-    }
-    for (let m = 1; m <= this.len; m++) {
-      this.column[m] = Math.min(this.column[m]!, this.column[m - 1]! + 1);
-    }
+    this.spare = new Float32Array(this.len + 1);
     this.cursorCell = this.startLocal;
     this.cursorLocalWord = -1;
     this.cursorCost = 0;
+    this.colMin = 0;
+    this.resetColumn();
   }
 
   get cursorWordIndex(): number {
@@ -113,19 +106,22 @@ export class Tracker {
     return (this.costs[n - 1]! - before) / w;
   }
 
+  /**
+   * Forget the last `n` heard chars: the result is the tracker that never fed
+   * them (spec §8). The shipped host never retracts CTC output, so this replays
+   * the kept prefix from the initial column rather than paying for periodic
+   * column snapshots on every feed.
+   */
   retract(n: number): void {
     if (n <= 0) return;
     this.revision++;
     const target = Math.max(0, this.heard.length - n);
-    const snap = [...this.snapshots].reverse().find((s) => s.length <= target);
-    if (!snap) this.resetColumn();
-    else this.restore(snap);
-    const replay = this.heard.slice(snap ? snap.length : 0, target);
-    this.heard.length = snap ? snap.length : 0;
-    this.trail.length = this.heard.length;
-    this.costs.length = this.heard.length;
+    const replay = this.heard.slice(0, target);
+    this.resetColumn();
+    this.heard.length = 0;
+    this.trail.length = 0;
+    this.costs.length = 0;
     this.feed(replay);
-    this.heard.length = target;
   }
 
   private resetColumn(): void {
@@ -142,65 +138,72 @@ export class Tracker {
     this.cursorLocalWord = -1;
     this.cursorCost = 0;
     this.lost = false;
-    this.snapshots.length = 0;
+    this.colMin = columnMin(this.column);
   }
 
-  private restore(snap: (typeof this.snapshots)[number]): void {
-    this.column = snap.column.slice();
-    this.cursorCell = snap.cursorCell;
-    this.cursorLocalWord = snap.cursorLocalWord;
-    this.cursorCost = snap.cursorCost;
-    this.lost = snap.lost;
-    this.snapshots.length = this.snapshots.findIndex((s) => s === snap) + 1;
-  }
-
+  /**
+   * One column of the surah-wide edit-distance DP (spec §8), in a single pass
+   * with no allocation. The spec describes it as a sweep, then a restart floor
+   * at every word start with forward delete-propagation, then an argmin. Doing
+   * all three per cell in order is the same computation: a cell's final value is
+   * the float32 of the cheapest of {substitute, insert, delete from the final
+   * left neighbour, restart}, whatever order those candidates are compared in,
+   * and no later step revisits a cell. So each cell is final when written and
+   * the argmin can scan it straight away. `colMin` is the previous argmin cost.
+   */
   private feedOne(h: HeardChar): void {
     const prev = this.column;
-    const next = new Float32Array(this.len + 1);
-    let colMin = prev[0]!;
-    for (let m = 1; m <= this.len; m++) if (prev[m]! < colMin) colMin = prev[m]!;
+    const next = this.spare;
+    const len = this.len;
+    const colMin = this.colMin;
     const jump = colMin + this.cfg.jumpCost;
     const repeat = colMin + this.cfg.repeatCost;
     const cursorAyah = this.cursorLocalWord < 0 ? -1 : this.corpus.wordAyah[this.firstWord + this.cursorLocalWord]!;
     const cursorPos = this.cursorCell;
-    const hid = this.table.id(h.ch);
+    const matrix = this.table.matrix;
+    const row = this.table.id(h.ch) * this.table.size;
+    const ref = this.ref;
+    const starts = this.wordStarts;
+    const ayahAt = this.ayahAtStart;
+    const nStarts = starts.length;
+    let si = 0;
 
-    next[0] = prev[0]! + 1;
-    if (this.wordStarts[0] === 0) {
-      const r = this.ayahAtStart[0] === cursorAyah ? repeat : jump;
-      if (r < next[0]!) next[0] = r;
+    let v = Math.fround(prev[0]! + 1);
+    while (si < nStarts && starts[si] === 0) {
+      const r = ayahAt[si] === cursorAyah ? repeat : jump;
+      if (r < v) v = Math.fround(r);
+      si++;
     }
-    for (let m = 1; m <= this.len; m++) {
-      next[m] = prev[m - 1]! + this.table.cost(hid, this.ref[m - 1]!);
+    next[0] = v;
+    let left = v;
+    let bestCell = 0;
+    let bestCost = v;
+    let bestDist = cursorPos;
+    for (let m = 1; m <= len; m++) {
+      v = Math.fround(prev[m - 1]! + matrix[row + ref[m - 1]!]!);
       const ins = prev[m]! + 1;
-      const del = next[m - 1]! + 1;
-      if (ins < next[m]!) next[m] = ins;
-      if (del < next[m]!) next[m] = del;
-    }
-    for (let i = 0; i < this.wordStarts.length; i++) {
-      const m = this.wordStarts[i]!;
-      const restart = m <= cursorPos && this.ayahAtStart[i] === cursorAyah ? repeat : jump;
-      if (restart < next[m]!) {
-        next[m] = restart;
-        for (let j = m + 1; j <= this.len && next[j - 1]! + 1 < next[j]!; j++) {
-          next[j] = next[j - 1]! + 1;
+      if (ins < v) v = Math.fround(ins);
+      const del = left + 1;
+      if (del < v) v = Math.fround(del);
+      while (si < nStarts && starts[si] === m) {
+        const restart = m <= cursorPos && ayahAt[si] === cursorAyah ? repeat : jump;
+        if (restart < v) v = Math.fround(restart);
+        si++;
+      }
+      next[m] = v;
+      left = v;
+      if (v <= bestCost) {
+        const d = m > cursorPos ? m - cursorPos : cursorPos - m;
+        if (v < bestCost || d < bestDist) {
+          bestCost = v;
+          bestCell = m;
+          bestDist = d;
         }
       }
     }
-
-    let bestCell = 0;
-    let bestCost = next[0]!;
-    let bestDist = Math.abs(0 - cursorPos);
-    for (let m = 1; m <= this.len; m++) {
-      const c = next[m]!;
-      const d = Math.abs(m - cursorPos);
-      if (c < bestCost || (c === bestCost && d < bestDist)) {
-        bestCost = c;
-        bestCell = m;
-        bestDist = d;
-      }
-    }
+    this.spare = prev;
     this.column = next;
+    this.colMin = bestCost;
     this.cursorCell = bestCell;
     this.cursorLocalWord = bestCell === 0 ? 0 : this.localWordOfPos[Math.min(bestCell, this.len) - 1]!;
     this.cursorCost = bestCost;
@@ -209,16 +212,5 @@ export class Tracker {
     this.heard.push(h);
     const rate = this.costRate(this.cfg.lostWindow);
     this.lost = rate !== null && rate >= this.cfg.lostRate;
-    if (this.heard.length % SNAPSHOT_EVERY === 0) {
-      this.snapshots.push({
-        length: this.heard.length,
-        column: this.column.slice(),
-        cursorCell: this.cursorCell,
-        cursorLocalWord: this.cursorLocalWord,
-        cursorCost: this.cursorCost,
-        lost: this.lost,
-      });
-      if (this.snapshots.length > SNAPSHOT_KEEP) this.snapshots.shift();
-    }
   }
 }

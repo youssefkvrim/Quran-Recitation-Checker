@@ -13,6 +13,11 @@ import type {
   WordVerdict,
 } from "./types.js";
 
+type RelocateCandidate =
+  | { surah: number; ayah: number }
+  | { query: string }
+  | null;
+
 export class RecitationEngine {
   readonly corpus: QuranCorpus;
   readonly index: QuranIndex;
@@ -36,9 +41,15 @@ export class RecitationEngine {
   private lostEmitted = false;
   private completedEmitted = false;
   private struggles = 0;
-  private relocateCandidate: { surah: number; ayah: number } | null = null;
+  /**
+   * The previous relocate tick's candidate. Only compared once a tick could
+   * actually relocate (rate ≥ lostRate), so a healthy tick stores its query and
+   * the search runs later, if ever — same decision, no search per tick.
+   */
+  private relocateCandidate: RelocateCandidate = null;
   private lastCursorWord = -1;
-  private lastStates = new Map<number, string>();
+  /** Last emitted verdict per word: its change key and the object it came from. */
+  private lastStates = new Map<number, { key: string; verdict: WordVerdict }>();
   private prevSettled = false;
   private lastStruggleChars = 0;
   onBeforeRelocate: (() => void) | null = null;
@@ -233,25 +244,24 @@ export class RecitationEngine {
     const qLen = Math.min(this.cfg.relocateQueryChars, this.buffer.length);
     const qStart = this.buffer.length - qLen;
     const query = this.buffer.slice(qStart).map((c) => c.ch).join("");
-    const result = this.index.search(query, null, 1);
-    const hit = result.hits[0];
     const rate = this.tracker.costRate();
+    const previous = this.relocateCandidate;
+    if (rate === null || rate < this.cfg.lostRate) {
+      this.relocateCandidate = { query };
+      return null;
+    }
+    const hit = this.index.search(query, null, 1).hits[0];
     const candidate = hit ? { surah: hit.surah, ayah: hit.ayah } : null;
-    const agrees =
-      !!candidate &&
-      !!this.relocateCandidate &&
-      candidate.surah === this.relocateCandidate.surah &&
-      candidate.ayah === this.relocateCandidate.ayah;
     this.relocateCandidate = candidate;
     if (
       hit &&
-      rate !== null &&
-      rate >= this.cfg.lostRate &&
       hit.surah !== this.tracker.surah &&
       hit.distance <= this.cfg.relocateMaxDistance &&
-      hit.distance + this.cfg.relocateRateMargin <= rate &&
-      agrees
+      hit.distance + this.cfg.relocateRateMargin <= rate
     ) {
+      const before = this.resolveCandidate(previous);
+      const agrees = !!before && before.surah === hit.surah && before.ayah === hit.ayah;
+      if (!agrees) return null;
       const from = {
         surah: this.tracker.surah,
         ayah: this.corpus.wordAyah[this.tracker.cursorWordIndex]!,
@@ -260,6 +270,12 @@ export class RecitationEngine {
       return this.lock(hit.wordIndex, replay, "relocated", from);
     }
     return null;
+  }
+
+  private resolveCandidate(c: RelocateCandidate): { surah: number; ayah: number } | null {
+    if (!c || !("query" in c)) return c;
+    const hit = this.index.search(c.query, null, 1).hits[0];
+    return hit ? { surah: hit.surah, ayah: hit.ayah } : null;
   }
 
   private isHeld(): boolean {
@@ -293,21 +309,25 @@ export class RecitationEngine {
     const vs = this.tracer.verdicts(settled);
     const changes: WordVerdict[] = [];
     const refreshPending = gotChars && this.prevSettled;
+    const present = new Set<number>();
     for (const v of vs) {
-      const key = `${v.state}:${v.distance}:${v.heardRatio}:${v.margin}`;
+      present.add(v.wordIndex);
       const prev = this.lastStates.get(v.wordIndex);
-      if (prev === key) continue;
-      const wasPending = prev?.startsWith("pending:") ?? false;
+      // The tracer reuses verdict objects, so identity implies an equal key.
+      if (prev?.verdict === v) continue;
+      const key = `${v.state}:${v.distance}:${v.heardRatio}:${v.margin}`;
+      if (prev?.key === key) continue;
+      const wasPending = prev?.key.startsWith("pending:") ?? false;
       if (wasPending && v.state === "pending" && !refreshPending) continue;
       changes.push(v);
-      this.lastStates.set(v.wordIndex, key);
+      this.lastStates.set(v.wordIndex, { key, verdict: v });
       if (v.state !== "pending" && !silenceSettle) {
         this.lastProgressFrame = this.framesDecoded;
       }
     }
     if (changes.length) events.push({ type: "verdicts", changes });
     for (const key of this.lastStates.keys()) {
-      if (!vs.some((v) => v.wordIndex === key)) this.lastStates.delete(key);
+      if (!present.has(key)) this.lastStates.delete(key);
     }
     this.prevSettled = settled;
     if (!this.completedEmitted && this.tracker.reachedEnd) {

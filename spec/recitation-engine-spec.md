@@ -969,7 +969,16 @@ The best opening then decides:
    - it leads the same phonemes anywhere else in the Quran by `quranMargin` (0.05).
 2. While it is within `maxDistance`, a basmala-anchored lock (al-Fātiḥa, 27:30, including the 1:2 collapse) is accepted only when that opening also leads the others by `searchDecisiveMargin`.
 
-The rule was tuned on two sets: all 113 openings (clean, and 3× perturbed with `perturbed()`), and 7,478 basmala-then-mid-surah starts. See `LatencyProbe.surahStartSweep` (`LATENCY=1`).
+The rule was tuned on two sets: all 113 openings (clean, and 3× perturbed with `perturbed()`), and 7,478 basmala-then-mid-surah starts. See `LatencyProbe.surahStartSweep` (`LATENCY=1`). Results, with a search after every phoneme:
+
+| | original | `.standard` |
+|---|---|---|
+| clean openings: right / wrong | 105 / 6 | 111 / 0 |
+| perturbed openings: right / wrong | 287 / 24 | 296 / 15 |
+| phonemes after the basmala to lock, p50 / p90 | 20 / 56 | 20 / 57 |
+| mid-surah starts locked onto an opening | 19 | 22 |
+
+The phonemes needed to lock are about the same: the gain is correctness. With recognition errors, some الحمد لله openings still go to al-Fātiḥa (9 of the 15). Requiring a 0.2 lead for the al-Fātiḥa gate removes more of them, but locks al-Fātiḥa itself 1.5 s later on the Alafasy recording. Dropping `quranMargin` to 0 cuts p90 to 53 but raises mid-surah false locks to 176.
 
 ### A.3 Search cadence
 

@@ -42,6 +42,9 @@ private struct RecitationView: View {
       }
       if let position = model.position, let text = model.text, let surah = text.surah(position.surah) {
         PassageView(surah: surah, position: position)
+      } else if let preamble = model.preamble {
+        Spacer()
+        PreambleView(progress: preamble)
       } else {
         Spacer()
         Placeholder(listening: model.isListening, mode: model.mode)

@@ -41,6 +41,8 @@ final class RecitationModel {
 
   private(set) var phase: Phase = .loading
   private(set) var position: Position?
+  /// The istiʿādha or basmala being recited before the surah is known.
+  private(set) var preamble: PreambleProgress?
   private(set) var level: Float = 0
   private(set) var summary: String?
   /// A recoverable problem to show under the button (permission, microphone).
@@ -111,6 +113,7 @@ final class RecitationModel {
       return
     }
     position = nil
+    preamble = nil
     summary = nil
     correction = nil
     apply(await service.begin(mode: mode))
@@ -248,6 +251,8 @@ final class RecitationModel {
         }
       case let .wordProgress(p):
         position = Position(surah: p.surah, ayah: p.ayah, word: p.wordIndex)
+      case let .preamble(p):
+        if position == nil { preamble = p }
       case let .finalSequence(verses, _):
         summary = Self.describe(verses, text: text)
       case let .correction(state, totalWords):
@@ -256,6 +261,7 @@ final class RecitationModel {
         break
       }
     }
+    if position != nil { preamble = nil }
   }
 
   private func openCorrection(_ state: CorrectionState, totalWords: Int) {

@@ -43,6 +43,12 @@ actor RecognitionService {
     backend.reset()
     var options = RecitationSession.Options()
     options.emitRawTranscript = false
+    // Respond during the istiʿādha and basmala, decide surah openings right
+    // after it, and search on every 480 ms window until the place is found.
+    options.emitPreamble = true
+    options.config.surahOpenings = .standard
+    options.config.searchEveryChars = 1
+    options.config.searchEveryFrames = 12
     session = RecitationSession(corpus: corpus, backend: backend, options: options)
     profile.loadSeconds = Self.seconds(ContinuousClock.now - start)
     return text

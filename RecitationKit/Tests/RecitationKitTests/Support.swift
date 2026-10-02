@@ -110,6 +110,8 @@ extension RecitationEvent {
     case let .finalSequence(verses, confidence):
       return ["type": "final_sequence", "confidence": confidence,
               "verses": verses.map { ["surah": $0.surah, "ayah": $0.ayah, "confidence": $0.confidence] }]
+    case let .preamble(p):
+      return ["type": "preamble", "kind": p.kind.rawValue, "words": p.words]
     case let .correction(state, totalWords):
       var issue: Any = NSNull()
       if let i = state.issue {

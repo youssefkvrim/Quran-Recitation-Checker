@@ -25,6 +25,12 @@ public struct EngineConfig: Equatable, Sendable {
   public var idleFrames: Int = 200
   public var maxStruggles: Int = 3
   public var settleFrames: Int = 25
+  /// After a complete basmala, decide between the surah openings first
+  /// (`SurahOpenings`). Nil reproduces the original engine and its spec
+  /// vectors, which lock al-An'ām, al-Kahf, Sabaʾ, Fāṭir, al-Jumuʿa and
+  /// at-Taghābun recited with their basmala onto al-Fātiḥa. The app sets
+  /// `.standard`.
+  public var surahOpenings: SurahOpenings.Rule?
 
   public init() {}
 

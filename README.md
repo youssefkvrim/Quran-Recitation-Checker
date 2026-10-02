@@ -54,7 +54,7 @@ The suite checks four things:
 - **Invariants.** Incremental caches match a from-scratch recompute, and the correction controller behaves correctly.
 - **Word mapping.** Every one of the 6236 ayahs' display words maps exactly onto the acoustic corpus words.
 
-Tests that need the corpus are skipped when it is absent. CI (`.github/workflows/ci.yml`) runs the suite on Linux, then builds the app for the iOS simulator on macOS.
+Tests that need the corpus are skipped when it is absent. CI (`.github/workflows/ci.yml`) runs the suite on Linux, then builds a Release app for iPhone on macOS. It publishes the result as an unsigned `QuranRecitationChecker.ipa` artifact, which can be signed and installed with your own Apple ID, for example with Sideloadly.
 
 ## Performance
 
@@ -66,6 +66,10 @@ These timings cover the engine's own work per 480 ms chunk: fbank, CTC decode, s
 | al-Kahf 1–110, p50 | | | 1.95 ms |
 
 Per-chunk cost stays flat over long sessions: v0 grew linearly with the length of the session.
+
+### Latency
+
+`LATENCY=1 tools/swift.sh test --filter LatencyProbe` replays the model's real decode of Alafasy reciting al-Fātiḥa through the session. It prints, for every word, when it was said and when the app showed it. Once the place is found, words appear 0.3–0.7 s after they are said: that is the model's 480 ms window. Finding the place is the long part, because the istiʿādha and basmala cannot say where a recitation is. In that recording al-Fātiḥa 1:2 was located at 9.3 s, with nothing shown before then. The app now follows the istiʿādha and basmala word by word, the first word at 1.1 s. It also locks surah openings right after the basmala, which fixes six surahs that used to lock onto al-Fātiḥa (spec appendix A).
 
 On an iPhone, hold the status line under the record button to show the live profile. It updates every second and shows:
 

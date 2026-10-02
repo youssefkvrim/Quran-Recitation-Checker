@@ -18,6 +18,9 @@ public enum RecitationEvent: Equatable, Sendable {
   case finalSequence(verses: [FinalVerse], confidence: Double)
   /// Correction mode: a possible mistake, a retry state, or its resolution.
   case correction(CorrectionState, totalWords: Int)
+  /// The istiʿādha or basmala being recited while the surah is not yet known
+  /// (`Options.emitPreamble`).
+  case preamble(PreambleProgress)
   case debug(DebugEvent)
 }
 
@@ -47,6 +50,9 @@ public final class RecitationSession {
     public var debug = false
     /// Emit `.rawTranscript` after every decoded chunk (O(transcript) each time).
     public var emitRawTranscript = true
+    /// Emit `.preamble` while an opening istiʿādha or basmala is recited (v0.2;
+    /// off reproduces the v0.1 event stream).
+    public var emitPreamble = false
     public init() {}
   }
 
@@ -70,6 +76,7 @@ public final class RecitationSession {
   /// Last verse match of the current tracker lock; cleared on (re)locate so an
   /// ayah gap across a jump never flags.
   private var lastMatch: AyahRef?
+  private var lastPreamble: PreambleProgress?
   private var ayahIssuesRaised = Set<AyahRef>()
   private var stopping = false
 
@@ -119,6 +126,7 @@ public final class RecitationSession {
     lastMatch = nil
     ayahIssuesRaised.removeAll()
     lastFallback = nil
+    lastPreamble = nil
     resetDecoder()
     engine = makeEngine()
   }
@@ -269,6 +277,7 @@ public final class RecitationSession {
     }
     for t in tokens { transcriptUnits.append(contentsOf: t.symbol) }
     for ev in engine.feed(tokens, framesDecoded: frame) { out += handle(ev) }
+    if options.emitPreamble, !tokens.isEmpty { out += preambleEvent() }
     out += emitNewMatches(nil)
     // Tracking mode never flags: skip the (non-settled) verdict trace entirely.
     if correction.mode == .correction, !stopping, let tracer = engine.tracer, let tracker = engine.tracker,
@@ -284,6 +293,13 @@ public final class RecitationSession {
     }
     if !tokens.isEmpty && options.emitRawTranscript { out.append(.rawTranscript(text: transcript, confidence: 1)) }
     return out
+  }
+
+  private func preambleEvent() -> [RecitationEvent] {
+    let heard = engine.searchBuffer.prefix(istiadhaIds.count + basmalaIds.count + 16).map { Phonemes.id($0.ch) }
+    guard let p = preambleProgress(heard), p != lastPreamble else { return [] }
+    lastPreamble = p
+    return [.preamble(p)]
   }
 
   private func handle(_ ev: EngineEvent) -> [RecitationEvent] {

@@ -3,8 +3,8 @@ public let istiadhaPhonemes: [Phone] = Array("ءَعُۥۥذُبِللَااهِ
 /// Basmala (32 chars, = 1:1).
 public let basmalaPhonemes: [Phone] = Array("بِسمِللَااهِررَحمَاانِررَحِۦۦۦۦم".utf16)
 
-private let istiadhaIds = Phonemes.encode(istiadhaPhonemes)
-private let basmalaIds = Phonemes.encode(basmalaPhonemes)
+let istiadhaIds = Phonemes.encode(istiadhaPhonemes)
+let basmalaIds = Phonemes.encode(basmalaPhonemes)
 
 private let gram = 5
 private let bucketBits = 18
@@ -18,7 +18,7 @@ private let verifyMarginAfter = 32
 private let minAligned = 20
 private let surahGap = 8
 private let shortQuery = 100
-private let preambleMaxDistance = 0.3
+let preambleMaxDistance = 0.3
 private let growingDistance = 0.35
 
 /// FNV-1a over 5 ids, as JS computes it with `Math.imul` (spec §7.1).
@@ -85,9 +85,11 @@ public final class QuranIndex: Sendable {
   private let surahCorpusStart: [Int]
   private let bucketStart: [Int32]
   private let postings: [Int32]
+  private let openings: SurahOpenings?
 
   public init(corpus: QuranCorpus, config: EngineConfig = .default, table: CostTable = .shared) {
     self.corpus = corpus
+    self.openings = config.surahOpenings.map { SurahOpenings(corpus: corpus, rule: $0, table: table) }
     self.cfg = config
     self.table = table
     let nSurah = corpus.surahs.count
@@ -136,11 +138,19 @@ public final class QuranIndex: Sendable {
     if growingIstiadha(query, table: table) { return none }
     let stripped = stripPreambles(query, table: table)
     let rest = Array(query[stripped.offset...])
+
+    // Right after a basmala: a surah opening, when one is clearly heard, and
+    // no basmala-anchored lock (al-Fātiḥa, 27:30) while the openings disagree.
+    var opening: SurahOpenings.Match?
+    if stripped.basmala, let openings, rest.count <= SurahOpenings.maxChars, let m = openings.match(rest[...]) {
+      if let hit = openingHit(m, rest: rest, stripped: stripped) { return SearchResult(hits: [hit], decisive: true) }
+      if m.distance <= openings.rule.maxDistance { opening = m }
+    }
     if rest.count < cfg.searchMinChars { return none }
 
     if stripped.basmala {
       var inner = searchSlice(Array(query[stripped.basmalaOffset...]), hint: hint, limit: limit, alignedBonus: 0)
-      if inner.decisive, let first = inner.hits.first, first.queryStart <= 2 {
+      if inner.decisive, let first = inner.hits.first, first.queryStart <= 2, agrees(first, opening) {
         for i in inner.hits.indices { inner.hits[i].queryStart += stripped.basmalaOffset }
         return inner
       }
@@ -158,6 +168,7 @@ public final class QuranIndex: Sendable {
       }
     }
     result.decisive = isDecisive(result.hits, queryLength: rest.count, alignedBonus: bonus, hint: hint)
+      && (result.hits.first.map { agrees($0, opening) } ?? true)
     for i in result.hits.indices {
       if collapsed.contains(i) { result.hits[i].queryStart = stripped.basmalaOffset } else { result.hits[i].queryStart += stripped.offset }
     }
@@ -172,8 +183,39 @@ public final class QuranIndex: Sendable {
     return result
   }
 
-  private func searchSlice(_ query: [UInt8], hint: SearchHint?, limit: Int, alignedBonus: Int) -> SearchResult {
-    if query.count < cfg.searchMinChars { return SearchResult(hits: [], decisive: false) }
+  /// Every verified hit for a query of at least `minChars`, best first,
+  /// without the decisiveness rules (the surah-start check uses it).
+  public func nearest(_ query: [UInt8], minChars: Int, limit: Int = 8) -> [SearchHit] {
+    searchSlice(query, hint: nil, limit: limit, alignedBonus: 0, minChars: minChars).hits
+  }
+
+  /// A lock on the opening `m` when it is clearly what follows the basmala:
+  /// long enough, close, clear of every other opening, and of everything else
+  /// in the Quran.
+  private func openingHit(_ m: SurahOpenings.Match, rest: [UInt8], stripped: StripResult) -> SearchHit? {
+    guard let rule = openings?.rule, m.isClear(rule), rest.count >= rule.minChars else { return nil }
+    let elsewhere = nearest(rest, minChars: 6).filter { abs($0.refOffset - m.refOffset) > 6 }.map(\.distance).min() ?? 1
+    guard elsewhere - m.distance >= rule.quranMargin else { return nil }
+    let loc = corpus.location(ofWord: m.wordIndex)
+    return SearchHit(surah: loc.surah, ayah: loc.ayah, word: loc.word, wordIndex: m.wordIndex,
+                     refOffset: Int(corpus.wordStart[m.wordIndex]), refEnd: m.refOffset + rest.count,
+                     queryStart: m.includesBasmala ? stripped.basmalaOffset : stripped.offset, distance: m.distance)
+  }
+
+  /// Whether a basmala-anchored hit (al-Fātiḥa, 27:30) is the opening that
+  /// leads the others by the search's usual decisive margin; always true when
+  /// no opening is in play.
+  private func agrees(_ hit: SearchHit, _ opening: SurahOpenings.Match?) -> Bool {
+    guard let opening else { return true }
+    let leads = opening.rival - opening.distance >= cfg.searchDecisiveMargin
+    if hit.surah == 1 && hit.ayah <= 2 { return opening.surah == 1 && leads }
+    if hit.surah == 27 && (hit.ayah == 30 || hit.ayah == 31) { return opening.wordIndex == corpus.ayahFirstWord(27, 31) && leads }
+    return true
+  }
+
+  private func searchSlice(_ query: [UInt8], hint: SearchHint?, limit: Int, alignedBonus: Int, minChars: Int? = nil) -> SearchResult {
+    let minChars = minChars ?? cfg.searchMinChars
+    if query.count < minChars { return SearchResult(hits: [], decisive: false) }
     var votes: [Int: Int] = [:]
     query.withUnsafeBufferPointer { q in
       bucketStart.withUnsafeBufferPointer { bucketStart in
@@ -197,7 +239,7 @@ public final class QuranIndex: Sendable {
       let from = max(0, start - verifyMarginBefore)
       let to = min(sep.count, start + query.count + verifyMarginAfter)
       let al = alignSemiGlobal(query, sep, from: from, to: to, table: table, headSkipCost: 0.5)
-      if query.count - al.queryStart < cfg.searchMinChars { continue }
+      if query.count - al.queryStart < minChars { continue }
       let refOffset = mapSep(al.refStart)
       let refEnd = mapSep(al.refEnd)
       if refEnd <= refOffset { continue }
@@ -266,5 +308,128 @@ public final class QuranIndex: Sendable {
     if local >= len { return cs + len }
     if local < 0 { return cs }
     return cs + local
+  }
+}
+
+// MARK: - Surah openings (v0.2; not part of the original engine)
+
+/// After a complete basmala the reciter is almost always starting a surah, so
+/// what follows is matched against the surah openings (spec appendix A.2).
+/// That decides which surah a basmala-anchored hit may claim: the original
+/// search gives al-Fātiḥa every surah that opens like it. It also locks an
+/// opening on its own once it is clear of every other opening and of the rest
+/// of the Quran.
+public final class SurahOpenings: Sendable {
+  public struct Match: Equatable, Sendable {
+    public var surah: Int
+    /// Where to lock: the surah's first word (1:1 for al-Fātiḥa, whose basmala is its first ayah).
+    public var wordIndex: Int
+    /// Lock including the basmala (al-Fātiḥa) rather than after it.
+    public var includesBasmala: Bool
+    public var distance: Double
+    /// Closest opening of any other surah.
+    public var rival: Double
+    /// Corpus offset (phoneme) where the matched opening's text starts.
+    public var refOffset: Int
+
+    /// Close to what was heard and clear of every other opening.
+    public func isClear(_ rule: Rule) -> Bool { distance <= rule.maxDistance && rival - distance >= rule.margin }
+  }
+
+  /// When an opening counts as heard, tuned on every opening (clean and
+  /// perturbed) against 7,478 basmala-then-mid-surah starts.
+  public struct Rule: Equatable, Sendable {
+    /// Post-basmala phonemes before an opening can lock on its own.
+    public var minChars = 10
+    /// Farthest an opening may be from what was heard.
+    public var maxDistance = 0.2
+    /// Lead over every other surah's opening.
+    public var margin = 0.2
+    /// Lead over the same phonemes anywhere else in the Quran.
+    public var quranMargin = 0.05
+    public init() {}
+    public static let standard = Rule()
+  }
+
+  /// Longest post-basmala stretch matched here; beyond it the general search decides.
+  public static let maxChars = 48
+
+  private struct Opening: Sendable {
+    let surah: Int
+    let wordIndex: Int
+    let includesBasmala: Bool
+    let refOffset: Int
+    let ids: [UInt8]
+  }
+
+  public let rule: Rule
+  private let openings: [Opening]
+  private let table: CostTable
+
+  public init(corpus: QuranCorpus, rule: Rule = .standard, table: CostTable = .shared) {
+    self.rule = rule
+    func ids(from word: Int, to end: Int) -> [UInt8] {
+      let a = Int(corpus.wordStart[word])
+      return Array(corpus.ids[a..<min(Int(corpus.wordStart[end]), a + Self.maxChars + 4)])
+    }
+    var list: [Opening] = []
+    for s in corpus.surahs where s.number != 9 {
+      // Al-Fātiḥa's basmala is 1:1, so what follows it is 1:2.
+      let from = s.number == 1 ? corpus.ayahFirstWord(1, 2) : s.firstWord
+      list.append(Opening(surah: s.number, wordIndex: s.firstWord, includesBasmala: s.number == 1,
+                          refOffset: Int(corpus.wordStart[from]), ids: ids(from: from, to: s.endWord)))
+    }
+    // 27:30 ends with the basmala, and 27:31 follows it.
+    if corpus.hasAyah(27, 31) {
+      let w = corpus.ayahFirstWord(27, 31)
+      list.append(Opening(surah: 27, wordIndex: w, includesBasmala: false,
+                          refOffset: Int(corpus.wordStart[w]), ids: ids(from: w, to: corpus.surahs[26].endWord)))
+    }
+    openings = list
+    self.table = table
+  }
+
+  /// The opening closest to `rest` (the phonemes heard after the basmala),
+  /// comparing `rest` with each opening's prefixes of about the same length.
+  public func match(_ rest: ArraySlice<UInt8>) -> Match? {
+    let n = rest.count
+    guard n > 0, n <= Self.maxChars else { return nil }
+    var bestIndex = -1, best = Double.infinity, rival = Double.infinity
+    for (i, o) in openings.enumerated() {
+      let d = prefixDistance(rest, o.ids)
+      if d < best {
+        if bestIndex >= 0, openings[bestIndex].wordIndex != o.wordIndex { rival = best }
+        best = d
+        bestIndex = i
+      } else if d < rival, o.wordIndex != openings[bestIndex].wordIndex {
+        rival = d
+      }
+    }
+    guard bestIndex >= 0 else { return nil }
+    let o = openings[bestIndex]
+    return Match(surah: o.surah, wordIndex: o.wordIndex, includesBasmala: o.includesBasmala, distance: best, rival: rival, refOffset: o.refOffset)
+  }
+
+  /// Least normalized distance between `a` and a prefix of `b` within 3 of its length.
+  private func prefixDistance(_ a: ArraySlice<UInt8>, _ b: [UInt8]) -> Double {
+    let n = a.count
+    let lo = max(1, n - 3), hi = min(b.count, n + 3)
+    guard lo <= hi else { return 1 }
+    var prev = [Double](repeating: 0, count: hi + 1)
+    var cur = prev
+    for j in 0...hi { prev[j] = Double(j) }
+    table.matrix.withUnsafeBufferPointer { matrix in
+      for (i, x) in a.enumerated() {
+        cur[0] = Double(i + 1)
+        let row = Int(x) * table.size
+        for j in 1...hi {
+          cur[j] = min(prev[j - 1] + Double(matrix[row + Int(b[j - 1])]), prev[j] + 1, cur[j - 1] + 1)
+        }
+        swap(&prev, &cur)
+      }
+    }
+    var d = Double.infinity
+    for len in lo...hi { d = min(d, prev[len] / Double(max(n, len))) }
+    return d
   }
 }

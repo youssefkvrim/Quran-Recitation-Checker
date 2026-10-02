@@ -935,3 +935,42 @@ The vectors are frozen. They were dumped from the original engine before its
 removal at `e172b79`; `dump_vectors.mjs` is no longer in the tree.
 
 A clean-room implementation is correct when it bit-matches (or, for fbank vs Python, max-abs `< 1e-3`) these JSON files and, with the same host loop, scores **53/53, 43/43, 248/256, 572/583**.
+
+---
+
+## Appendix — v0.2 additions (opt-in)
+
+Both are off by default, so the vectors above still describe the engine bit for bit. The iOS app turns them on (`RecognitionService.load()`), and `RecitationStartTests` pins them.
+
+### A.1 Preamble progress (`RecitationSession.Options.emitPreamble`)
+
+§7.6 strips an opening istiʿādha and basmala before searching. So during the first 3–8 s of a typical recitation the engine is silent: the istiʿādha is not Quran text, and the basmala opens 113 surahs. While the engine is `searching`, the session now reports how far into them the reciter is:
+
+- Word ends: istiʿādha `[8, 17, 21, 32, 40]` (`ءَعُۥۥذُ | بِللَااهِ | مِنَ | ششَييطَاانِ | ررَجِۦۦم`). Basmala `[5, 12, 22, 32]`, the corpus words of 1:1.
+- A word counts as heard when `heard[offset..<offset+len]` matches the phrase up to that word's end. The tolerance is `preambleMaxDistance` (0.3), for some `len` from `end − min(3, wordLength / 3)` to `end + 3`.
+- The istiʿādha is matched first. When all 5 of its words are in, the basmala is matched from where the istiʿādha ended. The reported phrase is the furthest one reached.
+- The session emits `.preamble(kind, words)` when that value changes, after a chunk with new tokens. Only the start of the search buffer is examined, so noise before the phrase means no event.
+
+### A.2 Surah openings after a basmala (`EngineConfig.surahOpenings`)
+
+**The problem.** The original search (§7.6) also tries basmala + what follows against the Quran text, accepting a hit whose `queryStart ≤ 2`. Only 1:1 and 27:30 contain the basmala in the corpus. So "basmala + الحمد لله" locks onto al-Fātiḥa although al-Anʿām, al-Kahf, Sabaʾ and Fāṭir open the same way. al-Jumuʿa and at-Taghābun (يسبح لله) do the same through the 1:2 collapse.
+
+**The fix.** With a rule set, after a complete basmala and while at most 48 phonemes follow it, those phonemes (`rest`) are compared with every surah opening:
+
+- The openings are 1:2 for al-Fātiḥa (locking 1:1 with the basmala replayed), every other surah's first word except at-Tawba, and 27:31.
+- The comparison is the least normalized distance to a prefix within 3 phonemes of `rest`'s length.
+
+The best opening then decides:
+
+1. It locks on its own when all of these hold:
+   - `rest ≥ minChars` (10),
+   - distance `≤ maxDistance` (0.2),
+   - it leads the next opening by `margin` (0.2),
+   - it leads the same phonemes anywhere else in the Quran by `quranMargin` (0.05).
+2. While it is within `maxDistance`, a basmala-anchored lock (al-Fātiḥa, 27:30, including the 1:2 collapse) is accepted only when that opening also leads the others by `searchDecisiveMargin`.
+
+The rule was tuned on two sets: all 113 openings (clean, and 3× perturbed with `perturbed()`), and 7,478 basmala-then-mid-surah starts. See `LatencyProbe.surahStartSweep` (`LATENCY=1`).
+
+### A.3 Search cadence
+
+The app sets `searchEveryChars = 1` and `searchEveryFrames = 12`, so the locate search runs on every 480 ms window instead of every 12 phonemes or 1 s. It costs a few milliseconds per window, and only until the place is found.

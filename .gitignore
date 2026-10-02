@@ -1,7 +1,7 @@
 .DS_Store
 
 # Swift / Xcode
-.build/
+.build*/
 .swiftpm/
 xcuserdata/
 DerivedData/

@@ -37,7 +37,7 @@ RUN_PERF=1 tools/swift.sh test -c release --filter Performance
 cd App && xcodegen generate                    # then build/run QuranRecitationChecker in Xcode
 ```
 
-The suite must be green before merge. CI (`.github/workflows/ci.yml`) runs it on Linux, then builds the app for the iOS simulator on macOS.
+The suite must be green before merge. CI (`.github/workflows/ci.yml`) runs it on Linux, then builds a Release app for iPhone on macOS and uploads an unsigned `.ipa` artifact. CI runs on pushes to `main`, on pull requests, and on manual dispatch (`workflow_dispatch`) for any branch.
 
 ## Engine rules
 
@@ -46,6 +46,8 @@ The suite must be green before merge. CI (`.github/workflows/ci.yml`) runs it on
 - **One caller at a time.** `feed`, `stop` and `reset` share the streaming encoder state, so they must never overlap. In the app, `RecognitionService` (an actor) serialises them.
 - **Hot path.** `feed` runs every 480 ms on device. Keep it allocation-light and incremental. `IncrementalTests` check that caches equal from-scratch recomputation; add to them when you add a cache.
 - Add a deterministic test that needs no ONNX with every engine change.
+- **Spec-parity defaults.** Engine and session defaults reproduce the spec vectors and the v0.1 goldens. v0.2 behaviour is opt-in and switched on by the app in `RecognitionService.load()`: `emitPreamble`, `config.surahOpenings`, and the search cadence. Spec appendix A covers it, and `RecitationStartTests` pins it. New behaviour follows the same pattern unless the spec itself changes.
+- **Latency.** `LATENCY=1 tools/swift.sh test --filter LatencyProbe` prints, per word, when it was said and when it was shown on real decoded audio. It also runs the surah-start sweep. Check it before and after anything that touches locating or tracking.
 
 ## App rules
 

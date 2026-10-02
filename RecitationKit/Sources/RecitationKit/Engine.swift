@@ -62,6 +62,9 @@ public final class RecitationEngine {
 
   public func setStayOnSurah(_ stay: Bool) { self.stay = stay }
 
+  /// What was heard since the search started, while it is searching.
+  public var searchBuffer: ArraySlice<HeardChar> { state == .searching ? buffer[...] : [] }
+
   public func startSearch() {
     state = .searching
     tracker = nil

@@ -1,8 +1,10 @@
 # Xcode project for the iOS app. Generate it with XcodeGen:
 #   brew install xcodegen && cd App && xcodegen generate && open QuranRecitationChecker.xcodeproj
-# Model + corpus come from ../assets (tools/fetch-assets.sh).
+# Model + corpus come from ../assets: `xcodegen generate` fetches them first
+# (tools/fetch-assets.sh, sha256-checked, a no-op once they are there).
 name: QuranRecitationChecker
 options:
+  preGenCommand: ../tools/fetch-assets.sh
   bundleIdPrefix: com.youssefkarim
   deploymentTarget:
     iOS: "26.0"

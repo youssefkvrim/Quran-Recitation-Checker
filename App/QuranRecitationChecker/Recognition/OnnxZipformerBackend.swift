@@ -23,9 +23,10 @@ final class OnnxZipformerBackend: ZipformerBackend {
   private let outputNames: Set<String>
   private let windowShape: [NSNumber]
 
-  /// - Parameter threads: intra-op threads. Two keeps inference on the
-  ///   performance cores; more mixes in efficiency cores and gets slower.
-  init(modelPath: String, io: ZipformerIO = .shipped, threads: Int32 = 2) throws {
+  /// - Parameter threads: intra-op threads. One: the model runs once per
+  ///   480 ms, and with spinning off every parallel section of a second
+  ///   thread costs a wake-up, ~6,800 operations per run.
+  init(modelPath: String, io: ZipformerIO = .shipped, threads: Int32 = 1) throws {
     let env = try ORTEnv(loggingLevel: .warning)
     let options = try ORTSessionOptions()
     try options.setGraphOptimizationLevel(.all)

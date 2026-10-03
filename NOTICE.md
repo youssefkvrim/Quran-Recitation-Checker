@@ -29,7 +29,7 @@ This repository is MIT-licensed (`LICENSE`). The model and phoneme corpus the ap
 
 These artefacts are **NPL-1.2 Derivatives** of Quran-Lab's Work. NPL-1.2 §7 is share-alike: a Derivative includes models trained, fine-tuned, or *evaluated* with the Work, and datasets, lexicons, or label sets produced from it. They are **not** covered by this repository's MIT licence. They are fetched by `tools/fetch-assets.sh` into `assets/`, never committed, and bundled into the app:
 
-- `zipformer_interp_gentle_a05.int8.onnx`: the blended model `interp-gentle-a0.5` (0.5 Quran-Lab v3.1 + 0.5 ft-gentle)
+- `zipformer_a0w_ep1_a05.int8.onnx`: the blended model `a0w-ep1-a0.5` (0.5 Quran-Lab v3 + 0.5 a fine-tune with waqf-2 labels and multi-ayah windows), from tilawa release `zipformer-a0w-ep1-a0.5`. It replaced `interp-gentle-a0.5` in v0.2; both use the same I/O manifest.
 - `zipformer_quran.json`: the phoneme corpus
 - the 251-token vocabulary, which is reproduced in `spec/vectors/tokens.json` and `RecitationKit/Sources/RecitationKit/Tokens.generated.swift`
 

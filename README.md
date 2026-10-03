@@ -45,7 +45,10 @@ Pick your team under Signing & Capabilities, choose an iPhone and run. Use a rea
 cd RecitationKit && swift test          # macOS; reads ../assets/zipformer_quran.json
 tools/swift.sh test                     # Linux or anywhere with Docker (swift:6.2-noble)
 RUN_PERF=1 tools/swift.sh test -c release --filter Performance
+tools/benchmark/run.sh                  # the full chain on 53 real recordings (needs Docker + Python)
 ```
+
+`tools/benchmark/run.sh` runs the app's whole recognition chain on the v1 benchmark: Swift fbank, windowing and session, with ONNX Runtime running the model. That benchmark is 53 real recordings from 16 reciters, studio and phone. With the a0w model and the app's settings it scores **53/53**, the same as the web app's reference stack. It locates the ayah after a median of 3.5 s of audio.
 
 The suite checks four things:
 

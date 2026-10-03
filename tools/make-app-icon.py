@@ -43,13 +43,14 @@ def save(img, name):
 
 
 mask = star_mask()
-light = gradient((0x25, 0x94, 0x72), (0x14, 0x5A, 0x44))
+# Ink on paper, like the web app.
+light = gradient((0x2A, 0x2A, 0x2A), (0x11, 0x11, 0x11))
 light.paste((255, 255, 255), mask=mask)
 save(light, "AppIcon.png")
 
 # Dark and tinted: transparent background, which iOS fills in.
 dark = Image.new("RGBA", (W, W), (0, 0, 0, 0))
-dark.paste((0x4A, 0xC9, 0x95, 255), mask=mask)
+dark.paste((0xF2, 0xF2, 0xF2, 255), mask=mask)
 save(dark, "AppIcon-Dark.png")
 
 tinted = Image.new("RGBA", (W, W), (0, 0, 0, 0))

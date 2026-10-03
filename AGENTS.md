@@ -34,6 +34,7 @@ tools/fetch-assets.sh                          # once; the tests and the app nee
 cd RecitationKit && swift test                 # macOS
 tools/swift.sh test                            # Linux (Docker, swift:6.2-noble)
 RUN_PERF=1 tools/swift.sh test -c release --filter Performance
+tools/benchmark/run.sh                         # full chain on 53 real recordings; must stay 53/53
 cd App && xcodegen generate                    # then build/run QuranRecitationChecker in Xcode
 ```
 

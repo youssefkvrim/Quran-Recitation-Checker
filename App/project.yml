@@ -27,7 +27,7 @@ targets:
     sources:
       - path: QuranRecitationChecker
       # NPL-1.2 assets, not committed: tools/fetch-assets.sh puts them here.
-      - path: ../assets/zipformer_interp_gentle_a05.int8.onnx
+      - path: ../assets/zipformer_a0w_ep1_a05.int8.onnx
         buildPhase: resources
         optional: true
       - path: ../assets/zipformer_quran.json

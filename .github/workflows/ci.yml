@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
         with:
-          key: zipformer-assets-v0.3.0
+          key: zipformer-assets-a0w
           path: assets
       - run: tools/fetch-assets.sh
       - run: tools/swift.sh test
@@ -33,7 +33,7 @@ jobs:
           xcode-version: latest-stable
       - uses: actions/cache@v4
         with:
-          key: zipformer-assets-v0.3.0
+          key: zipformer-assets-a0w
           path: assets
       - run: tools/fetch-assets.sh
       - run: swift test

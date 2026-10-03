@@ -32,9 +32,9 @@ mic (AVAudioEngine, .measurement)  ->  16 kHz mono float
 Requirements: Xcode 26 or later, and an iPhone on iOS 26 or later.
 
 ```bash
-tools/fetch-assets.sh        # 66 MB model + 5.5 MB phoneme corpus -> assets/ (sha256-checked)
 brew install xcodegen
 cd App && xcodegen generate && open QuranRecitationChecker.xcodeproj
+# generate also fetches the 66 MB model + 5.5 MB phoneme corpus into assets/ (tools/fetch-assets.sh)
 ```
 
 Then, in Xcode:

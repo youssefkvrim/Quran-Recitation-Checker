@@ -51,6 +51,15 @@ final class RecitationModel {
   private(set) var text: QuranText?
   /// Whether a correction action is waiting for the engine.
   private(set) var acting = false
+  /// Seconds recognition is behind the microphone (latest chunk).
+  private(set) var lag: Double = 0
+  /// When the current recitation started, for the "not found yet" hint.
+  private(set) var listeningSince: Date?
+  /// The last recitation's WAV and timing report, for "Share recording".
+  private(set) var recordingFiles: [URL]?
+
+  /// Recognition is more than 1.5 s behind the microphone: the device is not keeping up.
+  var isFallingBehind: Bool { isListening && lag > 1.5 }
 
   var mode: RecitationMode {
     didSet {
@@ -73,6 +82,7 @@ final class RecitationModel {
   private let service = RecognitionService()
   private let microphone = MicrophoneCapture()
   private var listening: Task<Void, Never>?
+  private var consuming: Task<Void, Never>?
   /// Start or stop in progress: ignore further taps until it settles.
   private var transitioning = false
   private var stopping = false
@@ -116,6 +126,8 @@ final class RecitationModel {
     preamble = nil
     summary = nil
     correction = nil
+    recordingFiles = nil
+    lag = 0
     apply(await service.begin(mode: mode))
     let stream: AsyncStream<MicrophoneCapture.Chunk>
     do {
@@ -125,6 +137,7 @@ final class RecitationModel {
       return
     }
     phase = .listening
+    listeningSince = .now
     UIApplication.shared.isIdleTimerDisabled = true
     battery = (ContinuousClock.now, UIDevice.current.batteryLevel, nil, 0)
     // A call or another app taking the microphone ends the recitation.
@@ -135,18 +148,23 @@ final class RecitationModel {
       guard type == .began else { return }
       Task { @MainActor in await self?.stop() }
     }
-    listening = Task { [service] in
-      for await chunk in stream {
-        self.level = chunk.level
-        do {
-          self.apply(try await service.feed(chunk.samples, capturedAt: chunk.captured))
-        } catch {
-          // Inference failed: release the microphone and say so.
-          self.microphone.stop()
-          UIApplication.shared.isIdleTimerDisabled = false
-          self.phase = .failed(error.localizedDescription)
-          break
-        }
+    // Recognition runs on the service actor; this actor only draws what it reports.
+    let (updates, continuation) = AsyncStream.makeStream(of: RecognitionService.Update.self, bufferingPolicy: .unbounded)
+    listening = Task { [service, microphone] in
+      do {
+        try await service.run(stream, updates: continuation)
+      } catch {
+        // Inference failed: release the microphone and say so.
+        microphone.stop()
+        UIApplication.shared.isIdleTimerDisabled = false
+        self.phase = .failed(error.localizedDescription)
+      }
+    }
+    consuming = Task {
+      for await update in updates {
+        level = update.level
+        lag = update.lag
+        apply(update.events)
       }
     }
   }
@@ -158,7 +176,10 @@ final class RecitationModel {
     defer { stopping = false }
     microphone.stop()
     await listening?.value
+    await consuming?.value
     listening = nil
+    consuming = nil
+    listeningSince = nil
     if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
     interruptionObserver = nil
     UIApplication.shared.isIdleTimerDisabled = false
@@ -171,6 +192,7 @@ final class RecitationModel {
     } catch {
       phase = .failed(error.localizedDescription)
     }
+    recordingFiles = try? await service.exportRecording(report: await performanceReport())
   }
 
   func correct(_ action: CorrectionAction) async {

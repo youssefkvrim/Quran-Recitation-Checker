@@ -17,3 +17,6 @@ App/ipa/
 
 # Local worktrees
 .worktrees/
+
+# tools/benchmark scratch
+tools/benchmark/.build/

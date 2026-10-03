@@ -17,12 +17,13 @@ struct CorrectionSheet: View {
       VStack(spacing: 18) {
         Text(status)
           .font(.caption.weight(.semibold))
-          .foregroundStyle(state.phase == .retrying ? .red : .secondary)
+          .foregroundStyle(state.phase == .retrying ? Color.rose : Color.muted)
+          .tracking(1.2)
         Text("\(correction.surahName) · Ayah \(issue.ayah) of \(correction.ayahCount)")
           .font(.subheadline)
           .foregroundStyle(.secondary)
         AyahView(surah: issue.surah, ayah: issue.ayah, text: correction.text,
-                 progress: .flagged(wholeAyah ? 0..<Int.max : issue.word..<(issue.word + max(1, issue.words ?? 1))),
+                 flagged: wholeAyah ? 0..<Int.max : issue.word..<(issue.word + max(1, issue.words ?? 1)),
                  size: 28)
         VStack(spacing: 6) {
           Text(title).font(.title3.weight(.semibold))
@@ -30,12 +31,10 @@ struct CorrectionSheet: View {
         }
         .multilineTextAlignment(.center)
         VStack(spacing: 10) {
-          Button(primary.label) { act(primary.action) }
-            .buttonStyle(.glassProminent)
-            .controlSize(.large)
-          Button(secondary.label) { act(secondary.action) }
-            .buttonStyle(.glass)
-            .controlSize(.large)
+          Button { act(primary.action) } label: { Text(primary.label).font(.body.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34) }
+            .primaryAction()
+          Button { act(secondary.action) } label: { Text(secondary.label).frame(maxWidth: .infinity, minHeight: 34) }
+            .secondaryAction()
         }
         .disabled(acting)
       }

@@ -14,6 +14,7 @@ struct PreambleView: View {
       .font(.quran(size: 30))
       .multilineTextAlignment(.center)
       .frame(maxWidth: .infinity)
+      .environment(\.layoutDirection, .rightToLeft)
       .animation(.smooth, value: progress)
       .accessibilityLabel(words.joined(separator: " "))
   }
@@ -23,12 +24,12 @@ struct PreambleView: View {
     for (i, word) in words.enumerated() {
       var piece = AttributedString(word)
       if i < progress.words {
-        piece.foregroundColor = Color.primary
+        piece.foregroundColor = Color.muted
       } else if i == progress.words {
-        piece.foregroundColor = Color.accentColor
-        piece.backgroundColor = Color.accentColor.opacity(0.14)
+        piece.foregroundColor = Color.paper
+        piece.backgroundColor = Color.ink
       } else {
-        piece.foregroundColor = Color.secondary
+        piece.foregroundColor = Color.ink
       }
       out += piece
       if i < words.count - 1 { out += AttributedString(" ") }

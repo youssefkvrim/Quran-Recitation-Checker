@@ -4,8 +4,10 @@
 ///
 /// Captures at the hardware rate and resamples with `AVAudioConverter`, whose
 /// filter state carries across buffers (no aliasing, no per-buffer phase
-/// glitches). `.measurement` mode keeps iOS voice processing (AGC, noise
-/// suppression) from reshaping the recitation.
+/// glitches). Voice processing is on (echo cancellation, noise suppression,
+/// automatic gain), like the web app's `getUserMedia` capture that the model
+/// is validated on; without it (`.measurement`) the built-in mic is raw and
+/// much quieter.
 final class MicrophoneCapture: @unchecked Sendable {
   struct Chunk: Sendable {
     var samples: [Float]
@@ -42,8 +44,10 @@ final class MicrophoneCapture: @unchecked Sendable {
   /// Start capturing. The stream ends when `stop()` is called.
   func start() throws -> AsyncStream<Chunk> {
     let session = AVAudioSession.sharedInstance()
-    try session.setCategory(.record, mode: .measurement, options: [])
+    try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
     try session.setActive(true)
+    // Not fatal: some routes (external interfaces) have no voice processing.
+    try? engine.inputNode.setVoiceProcessingEnabled(true)
     let (stream, continuation) = AsyncStream.makeStream(of: Chunk.self, bufferingPolicy: .unbounded)
     lock.withLock { self.continuation = continuation }
     try installTap()
@@ -76,6 +80,8 @@ final class MicrophoneCapture: @unchecked Sendable {
     let format = input.outputFormat(forBus: 0)
     guard format.sampleRate > 0, format.channelCount > 0 else { throw Failure.noInput }
     guard let converter = AVAudioConverter(from: format, to: target) else { throw Failure.unsupportedFormat }
+    // Voice processing can expose several channels: mix them down, not just the first.
+    converter.downmix = true
     lock.withLock { self.converter = converter }
     // ~85 ms at 48 kHz: small enough that the model sees each window promptly.
     input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in

@@ -33,8 +33,6 @@ targets:
       - path: ../assets/zipformer_quran.json
         buildPhase: resources
         optional: true
-    # A shared scheme, so `xcodebuild -scheme` works on a fresh checkout (CI).
-    scheme: {}
     dependencies:
       - package: RecitationKit
       - package: onnxruntime
@@ -60,3 +58,17 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_STYLE: Automatic
+
+# Shared scheme (so `xcodebuild -scheme` works on a fresh checkout). Run uses
+# Release: in Debug the engine is unoptimised and falls behind the microphone.
+schemes:
+  QuranRecitationChecker:
+    build:
+      targets:
+        QuranRecitationChecker: all
+    run:
+      config: Release
+    profile:
+      config: Release
+    archive:
+      config: Release

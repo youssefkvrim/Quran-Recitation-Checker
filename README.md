@@ -37,7 +37,14 @@ brew install xcodegen
 cd App && xcodegen generate && open QuranRecitationChecker.xcodeproj
 ```
 
-Pick your team under Signing & Capabilities, choose an iPhone and run. Use a real device: the simulator's microphone path is not representative.
+Then, in Xcode:
+
+1. Select the **QuranRecitationChecker** target, then **Signing & Capabilities**. Tick *Automatically manage signing* and pick your Apple ID's team; a free account works ("Personal Team"). If the bundle identifier is taken, change it to anything unique.
+2. Plug in the iPhone, unlock it and trust the Mac. Turn on **Settings → Privacy & Security → Developer Mode**, which appears after the phone has been connected to Xcode, then restart the phone.
+3. Choose the iPhone as the run destination and press **Run** (⌘R). The first build downloads ONNX Runtime and takes a few minutes.
+4. If the phone says "Untrusted Developer", trust your Apple ID under **Settings → General → VPN & Device Management**, then run again.
+
+The scheme runs the **Release** configuration. A Debug build of the engine is too slow to keep up with the microphone. A free account's install lasts 7 days; press Run again to renew it. Use a real device: the simulator's microphone path is not representative.
 
 ## Tests
 
